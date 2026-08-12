@@ -1,0 +1,357 @@
+/*
+ * Tiles - tiling scene transition for OBS Studio
+ *
+ * Every shape here tiles the plane edge to edge, so at full scale the tiles
+ * leave no uncovered pixel:
+ *
+ *   square    - unit square lattice
+ *   hexagon   - Voronoi cells of a triangular lattice (pointy-top hexagons)
+ *   triangle  - equilateral triangles, two per lattice rhombus
+ *   circle    - circumscribed circles on the hexagonal lattice; they overshoot
+ *               the cell and overlap their neighbours to close the gaps
+ *
+ * NOTE: the lattice and coverage math is mirrored in test/test-tiling.c.
+ * Keep the two in sync when changing shape_metric()/resolve_tile().
+ */
+
+uniform float4x4 ViewProj;
+uniform texture2d a_tex;
+uniform texture2d b_tex;
+
+uniform float2 canvas;     /* render target size, pixels */
+uniform float2 origin_px;  /* tiling origin, pixels */
+uniform float2 grid_rot;   /* cos/sin of the lattice rotation */
+uniform float2 dir_vec;    /* sweep axis, unit length */
+uniform float2 dir_range;  /* x: projection minimum, y: projection span */
+
+uniform float4 color_a;    /* gradient start */
+uniform float4 color_b;    /* gradient end */
+
+uniform float progress;    /* eased transition time, 0..1 */
+uniform float tile_px;     /* lattice unit, pixels */
+uniform float edge;        /* antialiasing width, metric units */
+uniform float stagger;     /* per tile animation length, fraction of the sweep */
+uniform float band;        /* wave band thickness, fraction of the sweep */
+uniform float randomness;  /* 0 = ordered sweep, 1 = fully shuffled */
+uniform float variation;   /* per tile brightness jitter */
+
+uniform int mode;          /* 0 cover, 1 keyhole, 2 wave, 3 crop, 4 scale */
+uniform int shape;         /* 0 square, 1 circle, 2 hexagon, 3 triangle */
+uniform int direction;     /* 0 in-out, 1 out-in, 2 mirror-in, 3 mirror-out, 4 angle */
+
+uniform bool invert;       /* keyhole: put the outgoing scene inside the tiles */
+uniform bool reverse_exit; /* cover: tiles leave in reverse order */
+uniform bool b_tiles;      /* dissolve: incoming scene arrives as tiles too */
+
+sampler_state textureSampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+/* ------------------------------------------------------------------ */
+/* lattice                                                            */
+/* ------------------------------------------------------------------ */
+
+float2 to_lattice(float2 px)
+{
+	float2 d = px - origin_px;
+	return float2(d.x * grid_rot.x + d.y * grid_rot.y, d.y * grid_rot.x - d.x * grid_rot.y) / tile_px;
+}
+
+float2 from_lattice(float2 q)
+{
+	float2 r = q * tile_px;
+	return float2(r.x * grid_rot.x - r.y * grid_rot.y, r.x * grid_rot.y + r.y * grid_rot.x) + origin_px;
+}
+
+/* Nearest centre of the triangular lattice: the plane split into hexagons. */
+float2 hex_centre(float2 q)
+{
+	float2 s = float2(1.0, 1.7320508);
+	float2 o = float2(0.5, 0.8660254);
+	float2 c1 = (floor(q / s) + 0.5) * s;
+	float2 c2 = (floor((q - o) / s) + 0.5) * s + o;
+	float2 d1 = q - c1;
+	float2 d2 = q - c2;
+	if (dot(d1, d1) < dot(d2, d2))
+		return c1;
+	return c2;
+}
+
+/*
+ * Distance to the tile edge, normalised: 0 at the tile centre, 1 on the tile
+ * boundary. A tile scaled by s about its centre covers the pixel when the
+ * metric is <= s, so s = 1 is exactly full coverage of the cell.
+ */
+float shape_metric(float2 local)
+{
+	if (shape == 0)
+		return max(abs(local.x), abs(local.y)) * 2.0;
+	if (shape == 1)
+		return length(local) * 1.7320508; /* 1 / circumradius */
+
+	float2 p = abs(local);
+	return max(p.x, p.x * 0.5 + p.y * 0.8660254) * 2.0;
+}
+
+struct Cell {
+	float2 centre; /* lattice space */
+	float metric;
+};
+
+Cell resolve_tile(float2 q)
+{
+	Cell cell;
+
+	if (shape == 0) {
+		cell.centre = floor(q) + 0.5;
+		cell.metric = shape_metric(q - cell.centre);
+	} else if (shape == 3) {
+		/* skew onto the (1,0) / (0.5, sqrt(3)/2) basis */
+		float sy = q.y / 0.8660254;
+		float sx = q.x - 0.5 * sy;
+		float2 ic = floor(float2(sx, sy));
+		float2 f = float2(sx, sy) - ic;
+		float3 bary;
+		float2 cs;
+
+		if (f.x + f.y < 1.0) {
+			bary = float3(1.0 - f.x - f.y, f.x, f.y);
+			cs = ic + 0.3333333;
+		} else {
+			bary = float3(1.0 - f.y, 1.0 - f.x, f.x + f.y - 1.0);
+			cs = ic + 0.6666667;
+		}
+
+		/* scaling about the centroid moves every barycentric equally */
+		cell.metric = 1.0 - 3.0 * min(bary.x, min(bary.y, bary.z));
+		cell.centre = float2(cs.x + 0.5 * cs.y, 0.8660254 * cs.y);
+	} else {
+		cell.centre = hex_centre(q);
+		cell.metric = shape_metric(q - cell.centre);
+	}
+
+	return cell;
+}
+
+/* ------------------------------------------------------------------ */
+/* sweep order                                                        */
+/* ------------------------------------------------------------------ */
+
+float hash21(float2 p)
+{
+	float2 h = frac(p * float2(127.1, 311.7));
+	h += dot(h, h + 47.31);
+	return frac(h.x * h.y);
+}
+
+/*
+ * Where this tile sits in the sweep, 0 (first) to 1 (last). The ranges are
+ * normalised against the whole canvas as seen from the origin, so an offset
+ * origin still finishes every tile inside the transition.
+ */
+float sweep_order(float2 centre_px)
+{
+	float2 d = centre_px - origin_px;
+
+	if (direction == 0)
+		return saturate(length(d) / dir_range.y);
+	if (direction == 1)
+		return 1.0 - saturate(length(d) / dir_range.y);
+
+	float proj = dot(d, dir_vec);
+
+	if (direction == 4)
+		return saturate((proj - dir_range.x) / dir_range.y);
+
+	float m = saturate(abs(proj) / dir_range.y);
+
+	if (direction == 3)
+		return m;
+	return 1.0 - m;
+}
+
+/* Antialiased coverage of a tile scaled by s. Exact at both extremes so a
+ * finished sweep leaves no seams and a spent tile leaves no speck. */
+float tile_coverage(float metric, float s)
+{
+	if (s <= 0.0)
+		return 0.0;
+	if (s >= 1.0)
+		return 1.0;
+	return saturate((s - metric) / edge + 1.0);
+}
+
+/* ------------------------------------------------------------------ */
+/* per tile evaluation                                                */
+/* ------------------------------------------------------------------ */
+
+struct Tile {
+	float2 centre_px;
+	float metric;
+	float cov;
+	float s;    /* scale of the shape, 0..1 */
+	float d;    /* sweep order */
+	float h;    /* per tile hash */
+	float on_b; /* 1 once this tile hides the switch to the incoming scene */
+};
+
+Tile eval_tile(float2 centre_lat, float metric)
+{
+	Tile tile;
+
+	tile.centre_px = from_lattice(centre_lat);
+	tile.metric = metric;
+	tile.h = hash21(centre_lat);
+	tile.d = lerp(sweep_order(tile.centre_px), tile.h, randomness);
+	tile.on_b = 0.0;
+
+	if (mode == 0) {
+		/* cover: build up over the first half, break up over the second */
+		float half_t = progress * 2.0;
+		float d = tile.d;
+
+		if (progress >= 0.5) {
+			half_t = (progress - 0.5) * 2.0;
+			tile.on_b = 1.0;
+			if (reverse_exit)
+				d = 1.0 - d;
+		}
+
+		float p = saturate((half_t - d * (1.0 - stagger)) / stagger);
+		tile.s = (progress >= 0.5) ? 1.0 - p : p;
+	} else if (mode == 2) {
+		/* wave: grow, hold for the band, shrink again */
+		float start = tile.d * (1.0 - 2.0 * stagger - band);
+		float grow = saturate((progress - start) / stagger);
+		float shrink = saturate((progress - start - stagger - band) / stagger);
+
+		tile.s = grow - shrink;
+		tile.on_b = (shrink > 0.0) ? 1.0 : 0.0;
+	} else {
+		float p = saturate((progress - tile.d * (1.0 - stagger)) / stagger);
+
+		/* keyhole grows a window into the incoming scene, the dissolves
+		 * and inverted keyhole shrink the outgoing one away */
+		tile.s = (mode == 1 && !invert) ? p : 1.0 - p;
+	}
+
+	tile.cov = tile_coverage(metric, tile.s);
+	return tile;
+}
+
+/* Circles reach past their own cell, so a pixel can belong to a neighbour. */
+Tile best_tile(float2 q)
+{
+	Cell cell = resolve_tile(q);
+	Tile best = eval_tile(cell.centre, cell.metric);
+
+	if (shape == 1) {
+		float2 c;
+		Tile n;
+
+		c = cell.centre + float2(1.0, 0.0);
+		n = eval_tile(c, shape_metric(q - c));
+		if (n.cov > best.cov)
+			best = n;
+
+		c = cell.centre + float2(-1.0, 0.0);
+		n = eval_tile(c, shape_metric(q - c));
+		if (n.cov > best.cov)
+			best = n;
+
+		c = cell.centre + float2(0.5, 0.8660254);
+		n = eval_tile(c, shape_metric(q - c));
+		if (n.cov > best.cov)
+			best = n;
+
+		c = cell.centre + float2(-0.5, 0.8660254);
+		n = eval_tile(c, shape_metric(q - c));
+		if (n.cov > best.cov)
+			best = n;
+
+		c = cell.centre + float2(0.5, -0.8660254);
+		n = eval_tile(c, shape_metric(q - c));
+		if (n.cov > best.cov)
+			best = n;
+
+		c = cell.centre + float2(-0.5, -0.8660254);
+		n = eval_tile(c, shape_metric(q - c));
+		if (n.cov > best.cov)
+			best = n;
+	}
+
+	return best;
+}
+
+float4 tile_colour(Tile tile)
+{
+	float4 c = lerp(color_a, color_b, tile.d);
+	c.rgb *= 1.0 + (tile.h * 2.0 - 1.0) * variation;
+	return c;
+}
+
+/* ------------------------------------------------------------------ */
+
+float4 PSTiles(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	Tile tile = best_tile(to_lattice(uv * canvas));
+
+	if (mode == 0 || mode == 2) {
+		float4 scene = (tile.on_b > 0.5) ? b_tex.Sample(textureSampler, uv)
+						 : a_tex.Sample(textureSampler, uv);
+		return lerp(scene, tile_colour(tile), tile.cov);
+	}
+
+	if (mode == 1) {
+		float4 a_col = a_tex.Sample(textureSampler, uv);
+		float4 b_col = b_tex.Sample(textureSampler, uv);
+		if (invert)
+			return lerp(b_col, a_col, tile.cov);
+		return lerp(a_col, b_col, tile.cov);
+	}
+
+	/* dissolves: the outgoing scene is cropped or squeezed into the tile */
+	float2 centre_uv = tile.centre_px / canvas;
+	float2 uv_a = uv;
+	if (mode == 4)
+		uv_a = centre_uv + (uv - centre_uv) / max(tile.s, 0.0001);
+
+	float4 base = b_tex.Sample(textureSampler, uv);
+
+	if (b_tiles) {
+		float grow = 1.0 - tile.s;
+		float2 uv_b = uv;
+		if (mode == 4)
+			uv_b = centre_uv + (uv - centre_uv) / max(grow, 0.0001);
+
+		base = lerp(tile_colour(tile), b_tex.Sample(textureSampler, uv_b),
+			    tile_coverage(tile.metric, grow));
+	}
+
+	return lerp(base, a_tex.Sample(textureSampler, uv_a), tile.cov);
+}
+
+technique Tiles
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSTiles(v_in);
+	}
+}

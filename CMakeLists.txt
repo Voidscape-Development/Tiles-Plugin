@@ -34,6 +34,37 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/tiles-transition.c src/tiles-transition.h)
+
+if(NOT MSVC)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE m)
+endif()
+
+option(ENABLE_TESTS "Build the tiling geometry tests" OFF)
+option(ENABLE_GPU_TESTS "Build the effect check that renders on a real graphics device" OFF)
+
+if(ENABLE_TESTS)
+  enable_testing()
+  add_executable(test-tiling test/test-tiling.c)
+  if(NOT MSVC)
+    target_link_libraries(test-tiling PRIVATE m)
+  endif()
+  add_test(NAME test-tiling COMMAND test-tiling)
+endif()
+
+# Not part of the ctest suite: it needs a graphics device, so it is run by hand
+# (under xvfb-run on a headless machine) against data/effects/tiles_transition.effect.
+if(ENABLE_GPU_TESTS)
+  add_executable(gpu-check test/gpu-check.c)
+  target_link_libraries(gpu-check PRIVATE OBS::libobs)
+  if(NOT MSVC)
+    target_link_libraries(gpu-check PRIVATE m)
+  endif()
+  if(APPLE)
+    target_compile_definitions(gpu-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-opengl.dylib")
+  elseif(WIN32)
+    target_compile_definitions(gpu-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
+  endif()
+endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
