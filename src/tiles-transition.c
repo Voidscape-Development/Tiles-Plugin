@@ -36,7 +36,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_COLOR         "color"
 #define S_COLOR_END     "color_end"
 #define S_VARIATION     "variation"
-#define S_STAGGER       "stagger"
+#define S_TILE_DURATION "tile_duration"
+#define S_STAGGER_OLD   "stagger" /* pre-rename name of S_TILE_DURATION */
 #define S_RANDOMNESS    "randomness"
 #define S_BAND          "band"
 #define S_EASING        "easing"
@@ -93,10 +94,11 @@ struct tiles_info {
 	gs_eparam_t *ep_progress;
 	gs_eparam_t *ep_tile_px;
 	gs_eparam_t *ep_edge;
-	gs_eparam_t *ep_stagger;
+	gs_eparam_t *ep_tile_dur;
 	gs_eparam_t *ep_band;
 	gs_eparam_t *ep_randomness;
 	gs_eparam_t *ep_variation;
+	gs_eparam_t *ep_easing;
 	gs_eparam_t *ep_mode;
 	gs_eparam_t *ep_shape;
 	gs_eparam_t *ep_direction;
@@ -115,7 +117,7 @@ struct tiles_info {
 	float origin_x;      /* 0..1 of canvas width */
 	float origin_y;      /* 0..1 of canvas height */
 	float band_px;
-	float stagger;
+	float tile_duration;
 	float randomness;
 	float variation;
 
@@ -149,6 +151,14 @@ static void tiles_update(void *data, obs_data_t *settings)
 	struct tiles_info *tiles = data;
 	uint32_t color;
 
+	/* S_TILE_DURATION used to be called "stagger". Carry a saved value over
+	 * so scenes tuned before the rename keep their timing. */
+	if (obs_data_has_user_value(settings, S_STAGGER_OLD)) {
+		if (!obs_data_has_user_value(settings, S_TILE_DURATION))
+			obs_data_set_double(settings, S_TILE_DURATION, obs_data_get_double(settings, S_STAGGER_OLD));
+		obs_data_unset_user_value(settings, S_STAGGER_OLD);
+	}
+
 	tiles->mode = (int)obs_data_get_int(settings, S_MODE);
 	tiles->shape = (int)obs_data_get_int(settings, S_SHAPE);
 	tiles->direction = (int)obs_data_get_int(settings, S_DIRECTION);
@@ -160,7 +170,7 @@ static void tiles_update(void *data, obs_data_t *settings)
 	tiles->origin_x = (float)obs_data_get_double(settings, S_ORIGIN_X) / 100.0f;
 	tiles->origin_y = (float)obs_data_get_double(settings, S_ORIGIN_Y) / 100.0f;
 	tiles->band_px = (float)obs_data_get_int(settings, S_BAND);
-	tiles->stagger = (float)obs_data_get_double(settings, S_STAGGER) / 100.0f;
+	tiles->tile_duration = (float)obs_data_get_double(settings, S_TILE_DURATION) / 100.0f;
 	tiles->randomness = (float)obs_data_get_double(settings, S_RANDOMNESS) / 100.0f;
 	tiles->variation = (float)obs_data_get_double(settings, S_VARIATION) / 100.0f;
 
@@ -177,7 +187,7 @@ static void tiles_update(void *data, obs_data_t *settings)
 	vec4_from_rgba_srgb(&tiles->color_b_srgb, color);
 
 	tiles->tile_px = clampf(tiles->tile_px, 4.0f, 4096.0f);
-	tiles->stagger = clampf(tiles->stagger, 0.01f, 1.0f);
+	tiles->tile_duration = clampf(tiles->tile_duration, 0.01f, 1.0f);
 }
 
 static void *tiles_create(obs_data_t *settings, obs_source_t *source)
@@ -218,10 +228,11 @@ static void *tiles_create(obs_data_t *settings, obs_source_t *source)
 	tiles->ep_progress = gs_effect_get_param_by_name(effect, "progress");
 	tiles->ep_tile_px = gs_effect_get_param_by_name(effect, "tile_px");
 	tiles->ep_edge = gs_effect_get_param_by_name(effect, "edge");
-	tiles->ep_stagger = gs_effect_get_param_by_name(effect, "stagger");
+	tiles->ep_tile_dur = gs_effect_get_param_by_name(effect, "tile_dur");
 	tiles->ep_band = gs_effect_get_param_by_name(effect, "band");
 	tiles->ep_randomness = gs_effect_get_param_by_name(effect, "randomness");
 	tiles->ep_variation = gs_effect_get_param_by_name(effect, "variation");
+	tiles->ep_easing = gs_effect_get_param_by_name(effect, "easing");
 	tiles->ep_mode = gs_effect_get_param_by_name(effect, "mode");
 	tiles->ep_shape = gs_effect_get_param_by_name(effect, "shape");
 	tiles->ep_direction = gs_effect_get_param_by_name(effect, "direction");
@@ -330,9 +341,9 @@ static obs_properties_t *tiles_properties(void *data)
 	p = obs_properties_add_float_slider(props, S_VARIATION, T_("Tiles.Variation"), 0.0, 100.0, 1.0);
 	obs_property_float_set_suffix(p, " %");
 
-	p = obs_properties_add_float_slider(props, S_STAGGER, T_("Tiles.Stagger"), 1.0, 100.0, 1.0);
+	p = obs_properties_add_float_slider(props, S_TILE_DURATION, T_("Tiles.TileDuration"), 1.0, 100.0, 1.0);
 	obs_property_float_set_suffix(p, " %");
-	obs_property_set_long_description(p, T_("Tiles.Stagger.Description"));
+	obs_property_set_long_description(p, T_("Tiles.TileDuration.Description"));
 
 	p = obs_properties_add_float_slider(props, S_RANDOMNESS, T_("Tiles.Randomness"), 0.0, 100.0, 1.0);
 	obs_property_float_set_suffix(p, " %");
@@ -365,7 +376,7 @@ static void tiles_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, S_COLOR, 0xFFFFFFFF);
 	obs_data_set_default_int(settings, S_COLOR_END, 0xFFFFFFFF);
 	obs_data_set_default_double(settings, S_VARIATION, 0.0);
-	obs_data_set_default_double(settings, S_STAGGER, 35.0);
+	obs_data_set_default_double(settings, S_TILE_DURATION, 35.0);
 	obs_data_set_default_double(settings, S_RANDOMNESS, 0.0);
 	obs_data_set_default_int(settings, S_BAND, 240);
 	obs_data_set_default_int(settings, S_EASING, TILES_EASE_IN_OUT);
@@ -377,15 +388,6 @@ static void tiles_defaults(obs_data_t *settings)
 /* ------------------------------------------------------------------ */
 /* render                                                             */
 /* ------------------------------------------------------------------ */
-
-static inline float tiles_ease(int easing, float t)
-{
-	if (easing == TILES_EASE_IN_OUT)
-		return t * t * (3.0f - 2.0f * t);
-	if (easing == TILES_EASE_OUT)
-		return 1.0f - (1.0f - t) * (1.0f - t);
-	return t;
-}
 
 /* Distance from a tile centre to the furthest pixel it owns, in pixels. */
 static inline float tiles_circumradius(const struct tiles_info *tiles)
@@ -465,7 +467,7 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	struct vec2 dir;
 	struct vec2 range;
 	float band;
-	float stagger = tiles->stagger;
+	float tile_dur = tiles->tile_duration;
 	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
 	bool previous_srgb = gs_framebuffer_srgb_enabled();
 
@@ -479,10 +481,10 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 
 	/* The wave has to grow, hold and shrink inside the same sweep. */
 	if (tiles->mode == TILES_MODE_WAVE) {
-		float total = 2.0f * stagger + band;
+		float total = 2.0f * tile_dur + band;
 
 		if (total > 0.95f) {
-			stagger *= 0.95f / total;
+			tile_dur *= 0.95f / total;
 			band *= 0.95f / total;
 		}
 	}
@@ -507,14 +509,17 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	gs_effect_set_vec2(tiles->ep_dir_vec, &dir);
 	gs_effect_set_vec2(tiles->ep_dir_range, &range);
 
-	gs_effect_set_float(tiles->ep_progress, tiles_ease(tiles->easing, t));
+	/* linear: the easing shapes the launch order inside the effect instead,
+	 * so every tile grows at the same rate wherever it sits in the sweep */
+	gs_effect_set_float(tiles->ep_progress, t);
 	gs_effect_set_float(tiles->ep_tile_px, tiles->tile_px);
 	gs_effect_set_float(tiles->ep_edge, tiles_edge_width(tiles));
-	gs_effect_set_float(tiles->ep_stagger, stagger);
+	gs_effect_set_float(tiles->ep_tile_dur, tile_dur);
 	gs_effect_set_float(tiles->ep_band, band);
 	gs_effect_set_float(tiles->ep_randomness, tiles->randomness);
 	gs_effect_set_float(tiles->ep_variation, tiles->variation);
 
+	gs_effect_set_int(tiles->ep_easing, tiles->easing);
 	gs_effect_set_int(tiles->ep_mode, tiles->mode);
 	gs_effect_set_int(tiles->ep_shape, tiles->shape);
 	gs_effect_set_int(tiles->ep_direction, tiles->direction);

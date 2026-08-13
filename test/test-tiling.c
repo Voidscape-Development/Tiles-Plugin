@@ -47,6 +47,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define DIR_MIRRORED_OUT 3
 #define DIR_ANGLE 4
 
+#define EASE_LINEAR 0
+#define EASE_IN_OUT 1
+#define EASE_OUT 2
+
 static int failures = 0;
 static int checks = 0;
 
@@ -186,6 +190,57 @@ static struct cell resolve_tile(int shape, struct vec2 q)
 	}
 
 	return cell;
+}
+
+static float saturatef(float v)
+{
+	if (v < 0.0f)
+		return 0.0f;
+	if (v > 1.0f)
+		return 1.0f;
+	return v;
+}
+
+/* mirrors ease_order() in the effect */
+static float ease_order(int easing, float d)
+{
+	if (easing == EASE_IN_OUT)
+		return d * d * (3.0f - 2.0f * d);
+	if (easing == EASE_OUT)
+		return 1.0f - (1.0f - d) * (1.0f - d);
+	return d;
+}
+
+/* How much of the transition a tile spends growing, found by walking the clock
+ * rather than by restating the formula. */
+static float growth_window(int easing, float td, float d, bool legacy)
+{
+	const int steps = 20000;
+	float first = -1.0f, last = -1.0f;
+	int i;
+
+	for (i = 0; i <= steps; i++) {
+		float t = (float)i / (float)steps;
+		float p;
+
+		if (legacy) {
+			/* the old scheme: ease the clock, launch on the raw order */
+			p = saturatef((ease_order(easing, t) - d * (1.0f - td)) / td);
+		} else {
+			p = saturatef((t - ease_order(easing, d) * (1.0f - td)) / td);
+		}
+
+		if (p > 0.0f && first < 0.0f)
+			first = t;
+		/* the last tile lands on p = 1 at t = 1, where the division
+		 * leaves it a rounding step short in float */
+		if (p >= 1.0f - 1e-6f && last < 0.0f)
+			last = t;
+	}
+
+	if (first < 0.0f || last < 0.0f)
+		return -1.0f;
+	return last - first;
 }
 
 static float sweep_order(int direction, struct vec2 origin, struct vec2 dir, struct vec2 range, struct vec2 centre)
@@ -481,8 +536,9 @@ static void test_sweep_completes(void)
 	const float origins[][2] = {{960.0f, 540.0f},  {0.0f, 0.0f},       {1920.0f, 1080.0f},
 				    {-600.0f, 300.0f}, {2400.0f, -200.0f}, {480.0f, 1080.0f}};
 	const float angles[] = {0.0f, 33.0f, 90.0f, 214.0f, 359.0f};
-	const float stagger = 0.35f;
-	int direction, o, a, shape;
+	const float tile_dur = 0.35f;
+	const int easings[] = {EASE_LINEAR, EASE_IN_OUT, EASE_OUT};
+	int direction, o, a, shape, e;
 
 	for (shape = 0; shape < 4; shape++)
 		for (direction = 0; direction < 5; direction++) {
@@ -492,7 +548,6 @@ static void test_sweep_completes(void)
 					struct vec2 origin = {origins[o][0], origins[o][1]};
 					struct vec2 dir, range;
 					float px, py;
-					float worst_start = 0.0f;
 					float lowest = 1.0f, highest = 0.0f;
 
 					g.shape = shape;
@@ -510,14 +565,11 @@ static void test_sweep_completes(void)
 							struct cell cell = resolve_tile(g.shape, to_lattice(&g, p));
 							struct vec2 centre = from_lattice(&g, cell.centre);
 							float d = sweep_order(direction, origin, dir, range, centre);
-							float start = d * (1.0f - stagger);
 
 							if (d < lowest)
 								lowest = d;
 							if (d > highest)
 								highest = d;
-							if (start > worst_start)
-								worst_start = start;
 						}
 					}
 
@@ -527,12 +579,19 @@ static void test_sweep_completes(void)
 					      direction_name(direction), angles[a], origins[o][0], origins[o][1],
 					      lowest, highest);
 
-					/* the last tile still finishes its own animation by t = 1 */
-					check(worst_start + stagger <= 1.0f + 1e-4f,
-					      "%s sweep at %.0f deg from origin %.0f/%.0f leaves the last tile "
-					      "unfinished at t=1 (starts at %.4f)",
-					      direction_name(direction), angles[a], origins[o][0], origins[o][1],
-					      worst_start);
+					/* the last tile still finishes its own animation by t = 1,
+					 * whichever curve the launch order is shaped by - the
+					 * easing is monotonic, so the latest tile is still the
+					 * one furthest along the sweep */
+					for (e = 0; e < 3; e++) {
+						float worst_start = ease_order(easings[e], highest) * (1.0f - tile_dur);
+
+						check(worst_start + tile_dur <= 1.0f + 1e-4f,
+						      "%s sweep at %.0f deg from origin %.0f/%.0f leaves the last "
+						      "tile unfinished at t=1 with easing %d (starts at %.4f)",
+						      direction_name(direction), angles[a], origins[o][0],
+						      origins[o][1], easings[e], worst_start);
+					}
 				}
 			}
 		}
@@ -542,17 +601,23 @@ static void test_sweep_completes(void)
  * swap underneath it is visible. */
 static void test_cover_is_opaque_at_the_switch(void)
 {
-	const float staggers[] = {0.01f, 0.35f, 1.0f};
-	int i;
+	const float tile_durs[] = {0.01f, 0.35f, 1.0f};
+	const int easings[] = {EASE_LINEAR, EASE_IN_OUT, EASE_OUT};
+	int i, e;
 
-	for (i = 0; i < 3; i++) {
-		float stagger = staggers[i];
-		float half_t = 1.0f; /* progress 0.5, doubled */
-		float d = 1.0f;      /* the very last tile */
-		float p = (half_t - d * (1.0f - stagger)) / stagger;
+	for (e = 0; e < 3; e++) {
+		for (i = 0; i < 3; i++) {
+			float tile_dur = tile_durs[i];
+			float half_t = 1.0f; /* progress 0.5, doubled */
+			float d = 1.0f;      /* the very last tile */
+			float start = ease_order(easings[e], d) * (1.0f - tile_dur);
+			float p = saturatef((half_t - start) / tile_dur);
 
-		check(p >= 1.0f - 1e-4f, "cover is only %.4f grown at the scene switch with %.0f%% stagger", p,
-		      stagger * 100.0f);
+			check(p >= 1.0f - 1e-4f,
+			      "cover is only %.4f grown at the scene switch with %.0f%% per-tile duration, "
+			      "easing %d",
+			      p, tile_dur * 100.0f, easings[e]);
+		}
 	}
 }
 
@@ -561,28 +626,104 @@ static void test_cover_is_opaque_at_the_switch(void)
 static void test_wave_fits_the_sweep(void)
 {
 	const float bands[] = {0.0f, 0.2f, 0.6f, 4.0f};
-	const float staggers[] = {0.01f, 0.35f, 1.0f};
+	const float tile_durs[] = {0.01f, 0.35f, 1.0f};
 	int i, j;
 
 	for (i = 0; i < 4; i++) {
 		for (j = 0; j < 3; j++) {
 			float band = bands[i];
-			float stagger = staggers[j];
-			float total = 2.0f * stagger + band;
+			float tile_dur = tile_durs[j];
+			float total = 2.0f * tile_dur + band;
 			float start, finish;
 
 			if (total > 0.95f) {
-				stagger *= 0.95f / total;
+				tile_dur *= 0.95f / total;
 				band *= 0.95f / total;
 			}
 
-			start = 1.0f * (1.0f - 2.0f * stagger - band);
-			finish = start + 2.0f * stagger + band;
+			start = 1.0f * (1.0f - 2.0f * tile_dur - band);
+			finish = start + 2.0f * tile_dur + band;
 
-			check(start >= -1e-4f, "wave band %.2f/stagger %.2f starts the last tile at %.4f", bands[i],
-			      staggers[j], start);
-			check(finish <= 1.0f + 1e-4f, "wave band %.2f/stagger %.2f finishes the last tile at %.4f",
-			      bands[i], staggers[j], finish);
+			check(start >= -1e-4f, "wave band %.2f/duration %.2f starts the last tile at %.4f", bands[i],
+			      tile_durs[j], start);
+			check(finish <= 1.0f + 1e-4f, "wave band %.2f/duration %.2f finishes the last tile at %.4f",
+			      bands[i], tile_durs[j], finish);
+		}
+	}
+}
+
+/* The easing shapes the launch order, not the clock. That is what keeps every
+ * tile growing at the same rate: whatever the easing, a tile's animation has to
+ * occupy the same slice of the transition wherever it sits in the sweep. */
+static void test_growth_is_evenly_paced(void)
+{
+	const int easings[] = {EASE_LINEAR, EASE_IN_OUT, EASE_OUT};
+	const float tile_durs[] = {0.15f, 0.35f, 0.6f};
+	int e, i, k;
+
+	for (e = 0; e < 3; e++) {
+		for (i = 0; i < 3; i++) {
+			float td = tile_durs[i];
+			float lo = 2.0f, hi = 0.0f;
+			float old_lo = 2.0f, old_hi = 0.0f;
+
+			for (k = 0; k <= 20; k++) {
+				float d = (float)k / 20.0f;
+				float w = growth_window(easings[e], td, d, false);
+				float old = growth_window(easings[e], td, d, true);
+
+				check(fabsf(w - td) < 0.01f,
+				      "easing %d gives the tile at %.2f %.4f of the transition to grow, not %.4f",
+				      easings[e], d, w, td);
+
+				if (w < lo)
+					lo = w;
+				if (w > hi)
+					hi = w;
+				if (old < old_lo)
+					old_lo = old;
+				if (old > old_hi)
+					old_hi = old;
+			}
+
+			/* the regression this guards: easing the clock stretched some
+			 * tiles and compressed others, and the compressed ones snapped */
+			check(hi - lo <= old_hi - old_lo + 1e-4f,
+			      "easing %d at %.0f%% spreads growth over %.4f..%.4f, no better than the %.4f..%.4f "
+			      "it replaced",
+			      easings[e], td * 100.0f, lo, hi, old_lo, old_hi);
+
+			if (easings[e] != EASE_LINEAR)
+				check(old_hi - old_lo > 0.01f,
+				      "easing %d at %.0f%% was already even, so this test proves nothing", easings[e],
+				      td * 100.0f);
+		}
+	}
+}
+
+/* Whichever curve the launch order is shaped by, the first tile still has to
+ * set off at the start and the last one still has to land on the finish. */
+static void test_easing_keeps_the_endpoints(void)
+{
+	const int easings[] = {EASE_LINEAR, EASE_IN_OUT, EASE_OUT};
+	int e, k;
+
+	for (e = 0; e < 3; e++) {
+		float previous = -1.0f;
+
+		check(ease_order(easings[e], 0.0f) == 0.0f, "easing %d starts the sweep at %.6f, not 0", easings[e],
+		      ease_order(easings[e], 0.0f));
+		check(ease_order(easings[e], 1.0f) == 1.0f, "easing %d finishes the sweep at %.6f, not 1", easings[e],
+		      ease_order(easings[e], 1.0f));
+
+		for (k = 0; k <= 200; k++) {
+			float d = (float)k / 200.0f;
+			float o = ease_order(easings[e], d);
+
+			check(o >= previous, "easing %d reorders the sweep at %.3f", easings[e], d);
+			check(o >= 0.0f && o <= 1.0f, "easing %d puts the tile at %.3f outside 0..1 (%.6f)", easings[e],
+			      d, o);
+			previous = o;
 		}
 	}
 }
@@ -597,6 +738,8 @@ int main(void)
 	test_sweep_completes();
 	test_cover_is_opaque_at_the_switch();
 	test_wave_fits_the_sweep();
+	test_growth_is_evenly_paced();
+	test_easing_keeps_the_endpoints();
 
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;

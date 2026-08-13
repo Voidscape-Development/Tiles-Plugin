@@ -27,14 +27,15 @@ uniform float2 dir_range;  /* x: projection minimum, y: projection span */
 uniform float4 color_a;    /* gradient start */
 uniform float4 color_b;    /* gradient end */
 
-uniform float progress;    /* eased transition time, 0..1 */
+uniform float progress;    /* transition time, 0..1; linear, see ease_order() */
 uniform float tile_px;     /* lattice unit, pixels */
 uniform float edge;        /* antialiasing width, metric units */
-uniform float stagger;     /* per tile animation length, fraction of the sweep */
+uniform float tile_dur;    /* per tile animation length, fraction of the sweep */
 uniform float band;        /* wave band thickness, fraction of the sweep */
 uniform float randomness;  /* 0 = ordered sweep, 1 = fully shuffled */
 uniform float variation;   /* per tile brightness jitter */
 
+uniform int easing;        /* 0 linear, 1 in-out, 2 out; shapes the launch order */
 uniform int mode;          /* 0 cover, 1 keyhole, 2 wave, 3 crop, 4 scale */
 uniform int shape;         /* 0 square, 1 circle, 2 hexagon, 3 triangle */
 uniform int direction;     /* 0 in-out, 1 out-in, 2 mirror-in, 3 mirror-out, 4 angle */
@@ -196,6 +197,32 @@ float tile_coverage(float metric, float s)
 	return saturate((s - metric) / edge + 1.0);
 }
 
+/*
+ * Eases the order tiles launch in, rather than the transition clock.
+ *
+ * The easing used to be applied to progress itself, which warped both when a
+ * tile started and how fast it grew. Tiles in the middle of the sweep landed
+ * on the fast part of the curve and had to finish their whole animation in
+ * noticeably fewer frames than tiles at either end - the same tile_dur buying
+ * three frames of growth in one place and five in another. That unevenness is
+ * what reads as clunky, and it gets worse the longer tile_dur is, because
+ * there is more per-tile animation to compress.
+ *
+ * Easing the launch order instead leaves the clock linear, so every tile grows
+ * at the same rate over the same number of frames, while the wavefront still
+ * accelerates away and settles the way the easing asks. The curve maps 0 to 0
+ * and 1 to 1, so the first tile still launches at the start and the last one
+ * still finishes at the end.
+ */
+float ease_order(float d)
+{
+	if (easing == 1)
+		return d * d * (3.0 - 2.0 * d);
+	if (easing == 2)
+		return 1.0 - (1.0 - d) * (1.0 - d);
+	return d;
+}
+
 /* ------------------------------------------------------------------ */
 /* per tile evaluation                                                */
 /* ------------------------------------------------------------------ */
@@ -232,18 +259,20 @@ Tile eval_tile(float2 centre_lat, float metric)
 				d = 1.0 - d;
 		}
 
-		float p = saturate((half_t - d * (1.0 - stagger)) / stagger);
+		/* eased after any reversal, so the exit sweep eases the way it
+		 * travels rather than running the curve backwards */
+		float p = saturate((half_t - ease_order(d) * (1.0 - tile_dur)) / tile_dur);
 		tile.s = (progress >= 0.5) ? 1.0 - p : p;
 	} else if (mode == 2) {
 		/* wave: grow, hold for the band, shrink again */
-		float start = tile.d * (1.0 - 2.0 * stagger - band);
-		float grow = saturate((progress - start) / stagger);
-		float shrink = saturate((progress - start - stagger - band) / stagger);
+		float start = ease_order(tile.d) * (1.0 - 2.0 * tile_dur - band);
+		float grow = saturate((progress - start) / tile_dur);
+		float shrink = saturate((progress - start - tile_dur - band) / tile_dur);
 
 		tile.s = grow - shrink;
 		tile.on_b = (shrink > 0.0) ? 1.0 : 0.0;
 	} else {
-		float p = saturate((progress - tile.d * (1.0 - stagger)) / stagger);
+		float p = saturate((progress - ease_order(tile.d) * (1.0 - tile_dur)) / tile_dur);
 
 		/* keyhole grows a window into the incoming scene, the dissolves
 		 * and inverted keyhole shrink the outgoing one away */

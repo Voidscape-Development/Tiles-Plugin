@@ -103,7 +103,7 @@ static void draw(int mode, int shape, int direction, float t, float angle_deg, f
 {
 	struct vec2 canvas, origin, grid_rot, dir, range;
 	struct vec4 green;
-	float tile_px = 64.0f, stagger = 0.35f, band, pad;
+	float tile_px = 64.0f, tile_dur = 0.35f, band, pad;
 	float angle = angle_deg * (float)M_PI / 180.0f;
 	float corner_x[4] = {0.0f, CW, 0.0f, CW}, corner_y[4] = {0.0f, 0.0f, CH, CH};
 	float max_radius = 0.0f, pmin = 0.0f, pmax = 0.0f;
@@ -136,9 +136,9 @@ static void draw(int mode, int shape, int direction, float t, float angle_deg, f
 
 	band = 240.0f / range.y;
 	if (mode == 2) {
-		float total = 2.0f * stagger + band;
+		float total = 2.0f * tile_dur + band;
 		if (total > 0.95f) {
-			stagger *= 0.95f / total;
+			tile_dur *= 0.95f / total;
 			band *= 0.95f / total;
 		}
 	}
@@ -166,10 +166,11 @@ static void draw(int mode, int shape, int direction, float t, float angle_deg, f
 	gs_effect_set_float(P("progress"), t);
 	gs_effect_set_float(P("tile_px"), tile_px);
 	gs_effect_set_float(P("edge"), edge_width(shape, tile_px));
-	gs_effect_set_float(P("stagger"), stagger);
+	gs_effect_set_float(P("tile_dur"), tile_dur);
 	gs_effect_set_float(P("band"), band);
 	gs_effect_set_float(P("randomness"), 0.0f);
 	gs_effect_set_float(P("variation"), 0.0f);
+	gs_effect_set_int(P("easing"), 0); /* linear order, so t maps straight to the sweep */
 	gs_effect_set_int(P("mode"), mode);
 	gs_effect_set_int(P("shape"), shape);
 	gs_effect_set_int(P("direction"), direction);
