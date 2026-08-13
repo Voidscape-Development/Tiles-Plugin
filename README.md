@@ -66,11 +66,20 @@ tile still finishes exactly as the transition ends.
   across the sweep. Set both the same for a flat colour.
 - **Colour Variation** — randomly lightens and darkens each tile so the fill is
   not perfectly flat.
-- **Tile Animation Length** — how much of the transition a single tile spends
-  growing. Small values give a sharp travelling edge; 100% animates every tile
-  at once.
+- **Per-Tile Duration** — how long a single tile's own animation lasts, as a
+  share of the whole transition. Low values give a sharp travelling edge; 100%
+  animates every tile at once. This is not the length of the transition itself,
+  which OBS sets.
 - **Order Randomness** — blends the ordered sweep towards a shuffle.
-- **Easing** — linear, ease in and out, or ease out.
+- **Easing** — linear, ease in and out, or ease out. This shapes the order tiles
+  launch in, not the transition clock, so the wavefront still accelerates away
+  and settles while every tile grows at the same steady rate.
+
+If the transition looks choppy, the usual cause is that there are not enough
+frames to animate in rather than anything in these settings: OBS's default 300 ms
+at 60 fps is only 18 frames, and a tile set to 35% has about 5 of them to grow
+in. Raising the transition duration in OBS buys every tile proportionally more
+frames, and is the most effective single change.
 - **Tiles leave in reverse order** (Cover) — the effect collapses back towards
   where it started instead of the wave carrying on through.
 
