@@ -357,9 +357,6 @@ float4 PSTiles(VertData v_in) : TARGET
 
 	/* dissolves: the outgoing scene is cropped or squeezed into the tile */
 	float2 centre_uv = tile.centre_px / canvas;
-	float2 uv_a = uv;
-	if (mode == 4)
-		uv_a = centre_uv + (uv - centre_uv) / max(tile.s, 0.0001);
 
 	float4 base = b_tex.Sample(textureSampler, uv);
 
@@ -373,7 +370,33 @@ float4 PSTiles(VertData v_in) : TARGET
 			    tile_coverage(tile.metric, grow));
 	}
 
-	return lerp(base, a_tex.Sample(textureSampler, uv_a), tile.cov);
+	/*
+	 * A tile with no coverage shows none of the outgoing scene, so the
+	 * sample below is multiplied away. Returning early skips it.
+	 *
+	 * This is worth a branch because the sample is the expensive one. Scale
+	 * Shrink divides by the tile scale, so as a tile finishes shrinking the
+	 * divisor falls to the 0.0001 floor and the coordinate is magnified by
+	 * up to 10000x: neighbouring pixels then read texels thousands apart and
+	 * every fetch misses the texture cache. Spent tiles are exactly the ones
+	 * pinned at that floor, and they are most of the canvas by the end of the
+	 * sweep, so the worst case ran over the largest area in the closing
+	 * frames. Coverage is zero across a whole spent tile, so the branch is
+	 * coherent rather than pixel by pixel.
+	 *
+	 * SampleLevel, not Sample: the branch only holds if the fetch needs no
+	 * gradients, otherwise it gets flattened back into an unconditional
+	 * sample. Both scenes arrive as canvas sized render targets with no mip
+	 * chain, so level 0 is the level Sample was already resolving to.
+	 */
+	if (tile.cov <= 0.0)
+		return base;
+
+	float2 uv_a = uv;
+	if (mode == 4)
+		uv_a = centre_uv + (uv - centre_uv) / max(tile.s, 0.0001);
+
+	return lerp(base, a_tex.SampleLevel(textureSampler, uv_a, 0.0), tile.cov);
 }
 
 technique Tiles
