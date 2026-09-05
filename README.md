@@ -1,17 +1,24 @@
 # Tiles
 
-A tiling scene transition for OBS Studio. The screen is divided into a lattice
-of shapes that animate in sequence to carry you from one scene to the next.
+Scene transitions for OBS Studio. The module provides two, both generated on the
+GPU with no bundled video:
 
-Every shape tiles the plane edge to edge, so when the tiles reach full size
-there is no uncovered pixel anywhere on the canvas — no seams, no background
-showing through.
+- **Tiling Transition** — the screen is divided into a lattice of shapes that
+  animate in sequence to carry you from one scene to the next.
+- **Vortex Transition** — a spiral portal tears open over the outgoing scene,
+  swallows the canvas, and lets the incoming one back in through the smoke.
 
 ## Installing
 
 Grab the build for your platform from the releases page and install it the way
 OBS plugins are normally installed on that platform. Then add the transition in
-OBS under **Scene Transitions → + → Tiling Transition**.
+OBS under **Scene Transitions → +**.
+
+# Tiling Transition
+
+Every shape tiles the plane edge to edge, so when the tiles reach full size
+there is no uncovered pixel anywhere on the canvas — no seams, no background
+showing through.
 
 ## Transition types
 
@@ -83,6 +90,42 @@ frames, and is the most effective single change.
 - **Tiles leave in reverse order** (Cover) — the effect collapses back towards
   where it started instead of the wave carrying on through.
 
+# Vortex Transition
+
+A spiral portal, generated per pixel rather than played back from a video file,
+so it scales to any canvas, recolours to your palette, and takes its speed from
+whatever duration OBS is set to.
+
+It runs in three phases:
+
+1. **Open** — a portal tears open at the centre over the outgoing scene, its rim
+   ragged and lit, with rays dragged inwards towards the hole. It grows until it
+   has swallowed the canvas.
+2. **Hold** — a full screen spiral turns. This is where the scenes are swapped,
+   under an overlay that is opaque from edge to edge, so the cut never shows.
+3. **Reveal** — the incoming scene erodes back in from the centre through dark
+   smoke tendrils.
+
+The arms come from sampling noise in log-polar space: a constant angular offset
+per unit of log(radius) is a logarithmic spiral, so the arms fall out of the
+coordinate system rather than being warped into place afterwards.
+
+## Settings
+
+| Setting | What it does |
+| --- | --- |
+| **Spiral Arms** | How many arms. Low counts read as a few broad sweeps, high counts as fine filaments. |
+| **Twist** | How tightly the arms wind in. 0 makes them straight spokes. |
+| **Spin** | Turns the vortex makes over the whole transition; negative spins the other way. Driven by the transition clock rather than wall time, so it looks the same every play. |
+| **Detail** | Noise frequency along the arms. |
+| **Edge Roughness** | How far the opening portal's rim is torn up. 0 gives a clean circle. The tear scales with the portal, so it stays the same fraction of the rim the whole way out. |
+| **Intensity** | Overall brightness of the generated light. |
+| **Core Colour** / **Vortex Colour** | Hot centres blow out towards the core colour; the body of the arms sits at the vortex colour. |
+| **Centre X/Y** | Where the portal opens. Can be pushed outside the frame (−50% to 150%); the portal is always sized to the furthest corner from wherever it sits, so an offset centre never leaves a corner of the outgoing scene showing when the scenes swap. |
+| **Portal Open** / **Reveal Start** | The phase split, as a share of the transition. Reveal Start is held above Portal Open so the hold is never empty. |
+| **Smoke Scale** / **Smoke Softness** | Size and edge width of the tendrils the incoming scene comes back through. |
+| **Swirl the scenes into the vortex** | Off by default. Screws the outgoing scene down into the centre and unwinds the incoming one back out of it, instead of leaving both flat behind the vortex. The first and last frame are untouched either way. |
+
 ## Building
 
 Standard OBS plugin template layout. See the
@@ -101,7 +144,16 @@ cmake --build --preset ubuntu-x86_64
 transition depends on: that each shape covers the canvas completely at full
 scale (across tile sizes, grid rotations and origins, including origins outside
 the frame), and that every tile's turn falls inside the transition so nothing is
-left unfinished. It needs no OBS and no GPU:
+left unfinished.
+
+`test/test-vortex.c` does the same for `data/effects/vortex_transition.effect`:
+that the transition starts on an untouched outgoing scene and ends on an
+untouched incoming one for every pixel and every setting, that the portal is
+opaque edge to edge for the whole hold so the scene swap cannot show, that the
+noise wrapped around the circle actually meets itself and leaves no seam, and
+that the portal is always sized past the furthest corner of the canvas.
+
+Neither needs OBS or a GPU:
 
 ```sh
 cmake -S . -B build -DENABLE_TESTS=ON
