@@ -1,0 +1,392 @@
+/*
+ * Vortex - a procedural spiral portal scene transition for OBS Studio.
+ *
+ * Nothing here is pre-rendered. The whole effect is generated per pixel from
+ * noise, so it is resolution independent and recolourable, and it costs no
+ * bundled media.
+ *
+ * The transition runs in three phases, split by open_end and reveal_start:
+ *
+ *   1. iris    - a portal grows out of the origin over the outgoing scene. Its
+ *                rim is broken into fibres by high frequency angular noise and
+ *                lit by a glow that tracks the ragged boundary.
+ *   2. hold    - the portal has swallowed the canvas and the full screen spiral
+ *                turns. The overlay is opaque here, which is where the scenes
+ *                are swapped.
+ *   3. reveal  - the incoming scene erodes back in through a domain warped
+ *                noise threshold, leaving dark smoke tendrils behind.
+ *
+ * The spiral arms come out of sampling noise in log-polar space. A constant
+ * angular offset per unit of log(r) *is* a logarithmic spiral, so feeding
+ * (angle + twist * log(r), log(r)) to an fBm gives arms for free, with none of
+ * the polar pinching you get from warping a cartesian field.
+ *
+ * The angular axis wraps, so the noise on it has to wrap too or there is a
+ * visible seam along the +x axis. vnoise_p() takes the lattice period and folds
+ * the cell index back into it; every octave doubles the period along with the
+ * frequency, so an integral period stays integral all the way down.
+ *
+ * NOTE: the phase schedule and the reveal threshold are mirrored in
+ * test/test-vortex.c. Keep the two in sync when changing phase_cover().
+ */
+
+uniform float4x4 ViewProj;
+uniform texture2d a_tex;
+uniform texture2d b_tex;
+
+uniform float2 canvas;    /* render target size, pixels */
+uniform float2 origin_px; /* vortex centre, pixels */
+uniform float unit_px;    /* pixels per field unit (half the canvas height) */
+uniform float reach;      /* field units from the origin to the far corner */
+
+uniform float progress;      /* transition time, 0..1 */
+uniform float open_end;      /* progress at which the portal fills the canvas */
+uniform float reveal_start;  /* progress at which the incoming scene starts back */
+uniform float cut;           /* progress at which the scenes are swapped */
+
+uniform float arms;   /* spiral arm count; integral, so the noise stays seamless */
+uniform float twist;  /* angular offset per unit of log(r) - spiral tightness */
+uniform float spin;   /* turns the spiral makes over the whole transition */
+uniform float detail; /* noise frequency along the arms */
+
+uniform float fringe;    /* how far the portal rim is chewed up, 0..1 of the reach */
+uniform float intensity; /* overall brightness of the generated light */
+
+uniform float smoke_scale; /* reveal noise frequency, cycles per field unit */
+uniform float smoke_soft;  /* reveal threshold width */
+
+uniform float warp;      /* peak scene twist, radians; 0 disables the whole path */
+uniform float warp_pull; /* peak scene zoom that goes with the twist */
+
+uniform float4 color_bright; /* hot core colour */
+uniform float4 color_deep;   /* body colour of the arms */
+
+sampler_state textureSampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+#define TAU 6.2831853
+
+/* Angular cells around the portal rim. Integral, and stays integral as the
+ * octaves double it, so the fibres meet cleanly where the circle closes. */
+#define FIBRES 96.0
+
+/* ------------------------------------------------------------------ */
+/* noise                                                              */
+/* ------------------------------------------------------------------ */
+
+float hash1(float2 p)
+{
+	float3 q = frac(float3(p.x, p.y, p.x) * float3(0.1031, 0.1030, 0.0973) + 7.13);
+	q += dot(q, float3(q.y, q.z, q.x) + 33.33);
+	return frac((q.x + q.y) * q.z);
+}
+
+/* Value noise whose lattice wraps along x with period per. */
+float vnoise_p(float2 p, float per)
+{
+	float2 i = floor(p);
+	float2 f = p - i;
+	float x0 = i.x - per * floor(i.x / per);
+	float x1 = i.x + 1.0 - per * floor((i.x + 1.0) / per);
+	float a, b, c, d;
+
+	f = f * f * (3.0 - 2.0 * f);
+
+	a = hash1(float2(x0, i.y));
+	b = hash1(float2(x1, i.y));
+	c = hash1(float2(x0, i.y + 1.0));
+	d = hash1(float2(x1, i.y + 1.0));
+
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+/* Four octaves, unrolled. The period doubles with the frequency so every
+ * octave closes at the same place the circle does. */
+float fbm_p(float2 p, float per)
+{
+	float v = 0.5 * vnoise_p(p, per);
+
+	p *= 2.0;
+	per *= 2.0;
+	v += 0.25 * vnoise_p(p, per);
+
+	p *= 2.0;
+	per *= 2.0;
+	v += 0.125 * vnoise_p(p, per);
+
+	p *= 2.0;
+	per *= 2.0;
+	v += 0.0625 * vnoise_p(p, per);
+
+	return v / 0.9375;
+}
+
+float vnoise(float2 p)
+{
+	float2 i = floor(p);
+	float2 f = p - i;
+	float a, b, c, d;
+
+	f = f * f * (3.0 - 2.0 * f);
+
+	a = hash1(i);
+	b = hash1(i + float2(1.0, 0.0));
+	c = hash1(i + float2(0.0, 1.0));
+	d = hash1(i + float2(1.0, 1.0));
+
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float fbm(float2 p)
+{
+	float v = 0.5 * vnoise(p);
+
+	p *= 2.0;
+	v += 0.25 * vnoise(p);
+
+	p *= 2.0;
+	v += 0.125 * vnoise(p);
+
+	p *= 2.0;
+	v += 0.0625 * vnoise(p);
+
+	return v / 0.9375;
+}
+
+/* ------------------------------------------------------------------ */
+/* phases                                                             */
+/* ------------------------------------------------------------------ */
+
+/* Two bands: broad lobes for the shape of the tear, fine chatter for the
+ * fibres along it. Both wrap, and the result stays inside 0..1, which is what
+ * iris_radius() leans on. */
+float iris_edge(float ang)
+{
+	float lobes = fbm_p(float2(ang * FIBRES / TAU, 3.7), FIBRES);
+	float chatter = fbm_p(float2(ang * FIBRES * 4.0 / TAU, 9.1), FIBRES * 4.0);
+
+	return saturate(lobes * 0.62 + chatter * 0.38);
+}
+
+/*
+ * The portal boundary, in field units. The fringe is subtracted from an
+ * oversized radius rather than added to a nominal one, so the extremes stay
+ * exact whatever the noise does: at k = 0 the radius is zero and nothing is
+ * covered, at k = 1 it is at or above the reach and everything is. Without that
+ * the transition would either flash a sliver of the outgoing scene at the
+ * corners or start with a speck of portal already showing.
+ *
+ * The fringe is scaled by k along with the radius. An unscaled one is a fixed
+ * width in field units, which is a reasonable fray on a portal that has grown
+ * to fill the canvas and a sea urchin on one that is still a few pixels wide.
+ * Scaling it keeps the tear the same fraction of the rim the whole way out.
+ */
+float iris_radius(float ang, float k)
+{
+	return k * reach * (1.0 + fringe) - k * fringe * reach * iris_edge(ang);
+}
+
+/*
+ * How much of the incoming scene has come back, 0..1.
+ *
+ * The threshold is driven by the noise and by the radius together, so the
+ * reveal erodes outwards from the origin instead of fading in everywhere at
+ * once, and the noise is warped by a second fBm so the edges tendril the way
+ * smoke does rather than breaking up into blobs.
+ *
+ * Like iris_radius() the ends are exact by construction: field never leaves
+ * 0..1, so k = 0 gives 0 and k = 1 gives 1 for every pixel.
+ */
+float reveal_amount(float2 p, float r, float k)
+{
+	float2 q = p * smoke_scale;
+	float2 w = float2(fbm(q + 11.3), fbm(q - 7.1)) - 0.5;
+	float n = fbm(q + w * 1.8);
+	float field = saturate(n * 0.55 + saturate(r / reach) * 0.45);
+	float soft = max(smoke_soft, 0.02);
+
+	return saturate((k * (1.0 + 2.0 * soft) - soft - field) / soft);
+}
+
+/* ------------------------------------------------------------------ */
+/* the vortex itself                                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Brightness envelope over the transition. The light ramps up as the portal
+ * opens, peaks as it fills the canvas, then decays across the hold and the
+ * reveal so that what is left carving up the incoming scene is dark smoke
+ * rather than a bright spiral.
+ */
+float glow_envelope()
+{
+	float rise = saturate(progress / max(open_end, 0.0001));
+	float fall = 1.0 - saturate((progress - open_end) / max(1.0 - open_end, 0.0001));
+
+	return rise * rise * lerp(0.06, 1.0, pow(fall, 1.8));
+}
+
+float3 vortex_colour(float2 p, float r, float ang, float rim)
+{
+	float lr = log(max(r, 0.02));
+	float s = ang + twist * lr - spin * TAU * progress;
+	float2 q = float2(s * arms / TAU, lr * detail - spin * progress);
+	float n = fbm_p(q, arms);
+	float ridge = 1.0 - abs(n * 2.0 - 1.0);
+
+	/* fBm crowds around its own mean, so the raw ridge is a broad smear.
+	 * Rescaling the top half of the range to 0..1 before squaring it is what
+	 * turns the arms into filaments with dark lanes between them instead of
+	 * one soft purple wash. */
+	float arm = saturate((ridge - 0.5) * 2.0);
+	float radial = saturate(1.0 - r / (reach * 1.15));
+	float e = arm * arm * 1.8 * radial * radial;
+	float3 col;
+
+	/* the hot point at the eye of the spiral */
+	e += 1.6 / (1.0 + r * r * 260.0);
+
+	/* anamorphic streak across it, the one deliberately lens-like flourish */
+	e += 0.7 * exp(-abs(p.y) * 70.0) * exp(-r * 2.0);
+
+	e *= intensity * glow_envelope();
+
+	/*
+	 * The rim is added after the envelope rather than through it. The
+	 * envelope is squared on the way up so the spiral does not bloom before
+	 * the portal has anything to bloom inside, but the rim is brightest
+	 * exactly when the portal is small, and running it through the same curve
+	 * put the light where the effect does not need it and took it away from
+	 * where it does.
+	 */
+	e += rim * intensity * saturate(progress / max(open_end, 0.0001));
+
+	/* dim energy is deep purple body, hot energy blows out towards the core
+	 * colour - one ramp doing the work of a bloom pass */
+	col = color_deep.rgb * e;
+	return lerp(col, color_bright.rgb, saturate((e - 1.1) / 0.9));
+}
+
+/* ------------------------------------------------------------------ */
+/* scene sampling                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Optional swirl. The reference this was modelled on leaves the scenes flat
+ * and only composites over them, so this is off by default; when it is on the
+ * outgoing scene screws down into the origin and the incoming one unwinds back
+ * out of it. Both ends are identity - amt and pull are handed in at zero at
+ * progress 0 and 1 - so the transition still starts and finishes on an
+ * untouched frame.
+ */
+float2 swirl_uv(float2 p, float r, float amt, float pull)
+{
+	float falloff = saturate(1.0 - r / (reach * 1.2));
+	float a = amt * falloff * falloff;
+	float ca = cos(a);
+	float sa = sin(a);
+	float2 q = float2(p.x * ca - p.y * sa, p.x * sa + p.y * ca) * pull;
+
+	return (q * unit_px + origin_px) / canvas;
+}
+
+float4 PSVortex(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float2 p = (uv * canvas - origin_px) / unit_px;
+	float2 pa = p + 0.00001; /* keeps atan2 defined at the exact origin */
+	float r = length(p);
+	float ang = atan2(pa.y, pa.x);
+	float aa = 1.5 / unit_px;
+
+	float radius = 0.0;
+	float cover;
+	float rim = 0.0;
+	float4 scene;
+
+	/*
+	 * Coverage is worked out first so the generated light can be skipped on
+	 * the pixels it would be multiplied away on. That is most of the canvas
+	 * while the portal is still small and again once the reveal has opened up,
+	 * and the branch is coherent because coverage is flat across both of those
+	 * regions. It is worth taking: the spiral behind it is four octaves of
+	 * wrapped noise, an exp and a pow, several times the cost of the coverage
+	 * test itself.
+	 */
+	if (progress < reveal_start) {
+		float k = saturate(progress / max(open_end, 0.0001));
+
+		radius = iris_radius(ang, k);
+		cover = saturate((radius - r) / aa + 0.5);
+	} else {
+		float k = saturate((progress - reveal_start) / max(1.0 - reveal_start, 0.0001));
+
+		cover = 1.0 - reveal_amount(p, r, k);
+	}
+
+	/*
+	 * d is zero on the first and last frame of the transition, and the swirl
+	 * is skipped outright there rather than run with a zero angle. The round
+	 * trip out to field units and back is only equal to uv to within floating
+	 * point, and a scene that is meant to be untouched should be sampled on
+	 * the coordinate it came in on, not half a texel off it.
+	 */
+	if (progress < cut) {
+		float d = saturate(progress / max(cut, 0.0001));
+		float2 uv_a = (warp > 0.0 && d > 0.0) ? swirl_uv(p, r, warp * pow(d, 1.5), 1.0 + warp_pull * d) : uv;
+
+		scene = a_tex.Sample(textureSampler, uv_a);
+	} else {
+		float d = saturate((1.0 - progress) / max(1.0 - cut, 0.0001));
+		float2 uv_b = (warp > 0.0 && d > 0.0) ? swirl_uv(p, r, -warp * pow(d, 1.5), 1.0 + warp_pull * d) : uv;
+
+		scene = b_tex.Sample(textureSampler, uv_b);
+	}
+
+	if (cover <= 0.0)
+		return scene;
+
+	/*
+	 * Only the opening portal has a lit rim to track; once it has swallowed
+	 * the canvas there is no boundary left.
+	 *
+	 * The falloff is deliberately lopsided. Outside the boundary the light
+	 * stops almost at once, which is what keeps the torn edge legible against
+	 * the outgoing scene; inside it it trails a long way back towards the
+	 * centre, and breaking that trail up with high frequency angular noise is
+	 * what reads as rays being dragged into the hole.
+	 */
+	if (progress < open_end) {
+		float dr = radius - r;
+		float ray = fbm_p(float2(ang * 220.0 / TAU, 1.3), 220.0);
+
+		rim = exp(-(dr > 0.0 ? dr / 0.30 : -dr / 0.05)) * (0.45 + 1.9 * ray * ray);
+	}
+
+	return lerp(scene, float4(vortex_colour(p, r, ang, rim), 1.0), cover);
+}
+
+technique Vortex
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSVortex(v_in);
+	}
+}

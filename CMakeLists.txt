@@ -34,13 +34,21 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/tiles-transition.c src/tiles-transition.h)
+target_sources(
+  ${CMAKE_PROJECT_NAME}
+  PRIVATE
+    src/plugin-main.c
+    src/tiles-transition.c
+    src/tiles-transition.h
+    src/vortex-transition.c
+    src/vortex-transition.h
+)
 
 if(NOT MSVC)
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE m)
 endif()
 
-option(ENABLE_TESTS "Build the tiling geometry tests" OFF)
+option(ENABLE_TESTS "Build the transition geometry tests" OFF)
 option(ENABLE_GPU_TESTS "Build the effect check that renders on a real graphics device" OFF)
 
 if(ENABLE_TESTS)
@@ -50,6 +58,12 @@ if(ENABLE_TESTS)
     target_link_libraries(test-tiling PRIVATE m)
   endif()
   add_test(NAME test-tiling COMMAND test-tiling)
+
+  add_executable(test-vortex test/test-vortex.c)
+  if(NOT MSVC)
+    target_link_libraries(test-vortex PRIVATE m)
+  endif()
+  add_test(NAME test-vortex COMMAND test-vortex)
 endif()
 
 # Not part of the ctest suite: it needs a graphics device, so it is run by hand
