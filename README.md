@@ -120,7 +120,10 @@ coordinate system rather than being warped into place afterwards.
 | **Detail** | Noise frequency along the arms. |
 | **Edge Roughness** | How far the opening portal's rim is torn up. 0 gives a clean circle. The tear scales with the portal, so it stays the same fraction of the rim the whole way out. |
 | **Intensity** | Overall brightness of the generated light. |
-| **Core Colour** / **Vortex Colour** | Hot centres blow out towards the core colour; the body of the arms sits at the vortex colour. |
+| **Core Colour** | What the hot centres blow out to when the vortex flashes. |
+| **Core Bleed** / **Core Blend** | How far the core colour reaches down into the arms when the vortex flashes, and how abruptly it takes over. 50% on both is the original look; turn the bleed up for a wide white-hot flash, down to keep the core colour to the brightest points. |
+| **Vortex Colour** | The body of the arms. |
+| **Vortex Colours** / **Colour Mix** | The body can mix up to four colours instead of one. Leave the count at 1 for a single flat colour; raise it and colours 2–4 appear alongside a **Colour Mix** setting for how they are spread — *Along the arms* drifts between them on the arms themselves, so different arms and different stretches of one arm take different colours; *Centre to edge* runs the palette out from the eye as a gradient; *Banded arms* is the same field snapped to flat bands of one colour each. |
 | **Centre X/Y** | Where the portal opens. Can be pushed outside the frame (−50% to 150%); the portal is always sized to the furthest corner from wherever it sits, so an offset centre never leaves a corner of the outgoing scene showing when the scenes swap. |
 | **Portal Open** / **Reveal Start** | The phase split, as a share of the transition. Reveal Start is held above Portal Open so the hold is never empty. |
 | **Smoke Scale** / **Smoke Softness** | Size and edge width of the tendrils the incoming scene comes back through. |
@@ -152,6 +155,14 @@ untouched incoming one for every pixel and every setting, that the portal is
 opaque edge to edge for the whole hold so the scene swap cannot show, that the
 noise wrapped around the circle actually meets itself and leaves no seam, and
 that the portal is always sized past the furthest corner of the canvas.
+
+It also covers the bounds the shader uses to skip work: the portal boundary
+never leaves the band the radius test assumes it is in, and the reveal really is
+finished below its low bound and untouched above its high one, so the pixels
+those tests throw away had nothing to contribute. The colour path is checked the
+same way — a single colour comes back exactly as it went in, a mix never invents
+a colour outside the two entries it sits between, and both core sliders land on
+the values the look was tuned at when left at their defaults.
 
 Neither needs OBS or a GPU:
 
