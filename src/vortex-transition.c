@@ -52,6 +52,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_CORE_BLEED   "core_bleed"
 #define S_CORE_BLEND   "core_blend"
 #define S_COLOR_BODY   "color_body"
+#define S_COLOR_BODY2  "color_body2"
+#define S_COLOR_BODY3  "color_body3"
+#define S_COLOR_BODY4  "color_body4"
+#define S_COLOR_COUNT  "color_count"
+#define S_COLOR_MIX    "color_mix"
 #define S_OPEN_END     "open_end"
 #define S_REVEAL_START "reveal_start"
 #define S_SMOKE_SCALE  "smoke_scale"
@@ -67,6 +72,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * would be swapped while a corner of the outgoing one was still showing. */
 #define VORTEX_PHASE_GAP 0.05f
 
+/* How many colours the body of the vortex can mix between. The shader blends
+ * them with a fixed chain of lerps, so this is a shader constant as much as a
+ * property range - raising it means adding a link there too. */
+#define VORTEX_BODY_COLORS 4
+
 /*
  * Core Bleed and Core Blend are geometric about the values the look was
  * originally tuned at, so both sliders reproduce it exactly at 50% and either
@@ -81,6 +91,34 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define VORTEX_CORE_WIDTH       0.9f
 #define VORTEX_CORE_LEVEL_RANGE 3.6f
 #define VORTEX_CORE_WIDTH_RANGE 4.0f
+
+enum vortex_color_mix {
+	VORTEX_MIX_ARMS = 0,
+	VORTEX_MIX_RADIAL = 1,
+	VORTEX_MIX_BANDS = 2,
+};
+
+/* clang-format off */
+
+static const char *const body_param[VORTEX_BODY_COLORS] = {
+	"color_deep", "color_deep2", "color_deep3", "color_deep4",
+};
+
+static const char *const body_setting[VORTEX_BODY_COLORS] = {
+	S_COLOR_BODY, S_COLOR_BODY2, S_COLOR_BODY3, S_COLOR_BODY4,
+};
+
+static const char *const body_label[VORTEX_BODY_COLORS] = {
+	"Vortex.ColorBody", "Vortex.ColorBody2", "Vortex.ColorBody3", "Vortex.ColorBody4",
+};
+
+/* obs colours are 0xAABBGGRR: #7A3FD0 purple body, then a teal, a magenta and a
+ * blue that mix with it without any pair of them turning muddy. */
+static const uint32_t body_default[VORTEX_BODY_COLORS] = {
+	0xFFD03F7A, 0xFFD0B53F, 0xFF9E3FD0, 0xFFD05A3F,
+};
+
+/* clang-format on */
 
 struct vortex_info {
 	obs_source_t *source;
@@ -110,7 +148,9 @@ struct vortex_info {
 	gs_eparam_t *ep_swirl_angle;
 	gs_eparam_t *ep_swirl_pull;
 	gs_eparam_t *ep_color_bright;
-	gs_eparam_t *ep_color_deep;
+	gs_eparam_t *ep_body[VORTEX_BODY_COLORS];
+	gs_eparam_t *ep_body_span;
+	gs_eparam_t *ep_color_mix;
 	gs_eparam_t *ep_core_level;
 	gs_eparam_t *ep_core_width;
 
@@ -129,13 +169,15 @@ struct vortex_info {
 	float warp;      /* radians, 0 when the swirl is off */
 	float warp_pull; /* zoom that travels with the swirl */
 
+	float body_span; /* body colour count minus one */
+	int color_mix;
 	float core_level;
 	float core_width;
 
 	struct vec4 color_bright;
 	struct vec4 color_bright_srgb;
-	struct vec4 color_deep;
-	struct vec4 color_deep_srgb;
+	struct vec4 body[VORTEX_BODY_COLORS];
+	struct vec4 body_srgb[VORTEX_BODY_COLORS];
 };
 
 static inline float clampf(float v, float lo, float hi)
@@ -159,6 +201,8 @@ static void vortex_update(void *data, obs_data_t *settings)
 	uint32_t color;
 	float bleed;
 	float blend;
+	int count;
+	int i;
 
 	vortex->origin_x = (float)obs_data_get_double(settings, S_ORIGIN_X) / 100.0f;
 	vortex->origin_y = (float)obs_data_get_double(settings, S_ORIGIN_Y) / 100.0f;
@@ -192,12 +236,29 @@ static void vortex_update(void *data, obs_data_t *settings)
 	vec4_from_rgba(&vortex->color_bright, color);
 	vec4_from_rgba_srgb(&vortex->color_bright_srgb, color);
 
-	color = (uint32_t)obs_data_get_int(settings, S_COLOR_BODY) | 0xFF000000;
-	vec4_from_rgba(&vortex->color_deep, color);
-	vec4_from_rgba_srgb(&vortex->color_deep_srgb, color);
+	for (i = 0; i < VORTEX_BODY_COLORS; i++) {
+		color = (uint32_t)obs_data_get_int(settings, body_setting[i]) | 0xFF000000;
+		vec4_from_rgba(&vortex->body[i], color);
+		vec4_from_rgba_srgb(&vortex->body_srgb[i], color);
+	}
 
-	bleed = clampf((float)obs_data_get_double(settings, S_CORE_BLEED) / 100.0f, 0.0f, 1.0f);
-	blend = clampf((float)obs_data_get_double(settings, S_CORE_BLEND) / 100.0f, 0.0f, 1.0f);
+	count = (int)obs_data_get_int(settings, S_COLOR_COUNT);
+	if (count < 1)
+		count = 1;
+	if (count > VORTEX_BODY_COLORS)
+		count = VORTEX_BODY_COLORS;
+
+	/* A span of zero puts every blend weight in the shader at zero, so a
+	 * single colour is the first colour exactly and the selector noise is
+	 * never run. The colours past the count are left uploaded but
+	 * unreachable. */
+	vortex->body_span = (float)(count - 1);
+	vortex->color_mix = (int)obs_data_get_int(settings, S_COLOR_MIX);
+
+	bleed = (float)obs_data_get_double(settings, S_CORE_BLEED) / 100.0f;
+	blend = (float)obs_data_get_double(settings, S_CORE_BLEND) / 100.0f;
+	bleed = clampf(bleed, 0.0f, 1.0f);
+	blend = clampf(blend, 0.0f, 1.0f);
 
 	/* More bleed is a lower threshold: the core colour starts taking over
 	 * sooner, so it reaches further down the arms. */
@@ -218,6 +279,7 @@ static void *vortex_create(obs_data_t *settings, obs_source_t *source)
 	struct vortex_info *vortex;
 	gs_effect_t *effect;
 	char *file = obs_module_file("effects/vortex_transition.effect");
+	int i;
 
 	if (!file) {
 		obs_log(LOG_ERROR, "effects/vortex_transition.effect is missing");
@@ -263,9 +325,13 @@ static void *vortex_create(obs_data_t *settings, obs_source_t *source)
 	vortex->ep_swirl_angle = gs_effect_get_param_by_name(effect, "swirl_angle");
 	vortex->ep_swirl_pull = gs_effect_get_param_by_name(effect, "swirl_pull");
 	vortex->ep_color_bright = gs_effect_get_param_by_name(effect, "color_bright");
-	vortex->ep_color_deep = gs_effect_get_param_by_name(effect, "color_deep");
+	vortex->ep_body_span = gs_effect_get_param_by_name(effect, "body_span");
+	vortex->ep_color_mix = gs_effect_get_param_by_name(effect, "color_mix");
 	vortex->ep_core_level = gs_effect_get_param_by_name(effect, "core_level");
 	vortex->ep_core_width = gs_effect_get_param_by_name(effect, "core_width");
+
+	for (i = 0; i < VORTEX_BODY_COLORS; i++)
+		vortex->ep_body[i] = gs_effect_get_param_by_name(effect, body_param[i]);
 
 	/* Applied directly for the same reason the tiling transition does it: the
 	 * source's data pointer is only assigned once create returns, so an update
@@ -292,9 +358,19 @@ static void vortex_destroy(void *data)
 
 static bool vortex_layout_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
+	long long count = obs_data_get_int(settings, S_COLOR_COUNT);
+	int i;
+
 	UNUSED_PARAMETER(prop);
 
 	obs_property_set_visible(obs_properties_get(props, S_SWIRL_AMOUNT), obs_data_get_bool(settings, S_SWIRL));
+
+	/* A single colour is the old behaviour, so neither the extra colours nor
+	 * the question of how to spread them is worth showing. */
+	obs_property_set_visible(obs_properties_get(props, S_COLOR_MIX), count > 1);
+
+	for (i = 1; i < VORTEX_BODY_COLORS; i++)
+		obs_property_set_visible(obs_properties_get(props, body_setting[i]), count > (long long)i);
 
 	return true;
 }
@@ -303,6 +379,7 @@ static obs_properties_t *vortex_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 	obs_property_t *p;
+	int i;
 
 	UNUSED_PARAMETER(data);
 
@@ -336,6 +413,20 @@ static obs_properties_t *vortex_properties(void *data)
 
 	obs_properties_add_color(props, S_COLOR_BODY, T_("Vortex.ColorBody"));
 
+	p = obs_properties_add_int_slider(props, S_COLOR_COUNT, T_("Vortex.ColorCount"), 1, VORTEX_BODY_COLORS, 1);
+	obs_property_set_long_description(p, T_("Vortex.ColorCount.Description"));
+	obs_property_set_modified_callback(p, vortex_layout_modified);
+
+	p = obs_properties_add_list(props, S_COLOR_MIX, T_("Vortex.ColorMix"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, T_("Vortex.ColorMix.Arms"), VORTEX_MIX_ARMS);
+	obs_property_list_add_int(p, T_("Vortex.ColorMix.Radial"), VORTEX_MIX_RADIAL);
+	obs_property_list_add_int(p, T_("Vortex.ColorMix.Bands"), VORTEX_MIX_BANDS);
+	obs_property_set_long_description(p, T_("Vortex.ColorMix.Description"));
+
+	for (i = 1; i < VORTEX_BODY_COLORS; i++)
+		obs_properties_add_color(props, body_setting[i], T_(body_label[i]));
+
 	p = obs_properties_add_float_slider(props, S_ORIGIN_X, T_("Vortex.OriginX"), -50.0, 150.0, 0.5);
 	obs_property_float_set_suffix(p, " %");
 	p = obs_properties_add_float_slider(props, S_ORIGIN_Y, T_("Vortex.OriginY"), -50.0, 150.0, 0.5);
@@ -366,6 +457,8 @@ static obs_properties_t *vortex_properties(void *data)
 
 static void vortex_defaults(obs_data_t *settings)
 {
+	int i;
+
 	obs_data_set_default_double(settings, S_ORIGIN_X, 50.0);
 	obs_data_set_default_double(settings, S_ORIGIN_Y, 50.0);
 	obs_data_set_default_int(settings, S_ARMS, 5);
@@ -375,13 +468,19 @@ static void vortex_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, S_ROUGHNESS, 35.0);
 	obs_data_set_default_double(settings, S_INTENSITY, 100.0);
 
-	/* obs colours are 0xAABBGGRR: #E8DCFF core, #7A3FD0 body */
+	/* obs colours are 0xAABBGGRR: #E8DCFF core */
 	obs_data_set_default_int(settings, S_COLOR_CORE, 0xFFFFDCE8);
-	obs_data_set_default_int(settings, S_COLOR_BODY, 0xFFD03F7A);
 
 	/* 50% on both is the ramp the look was tuned with */
 	obs_data_set_default_double(settings, S_CORE_BLEED, 50.0);
 	obs_data_set_default_double(settings, S_CORE_BLEND, 50.0);
+
+	for (i = 0; i < VORTEX_BODY_COLORS; i++)
+		obs_data_set_default_int(settings, body_setting[i], (long long)body_default[i]);
+
+	/* one colour: the extra slots are there to be turned on, not on by default */
+	obs_data_set_default_int(settings, S_COLOR_COUNT, 1);
+	obs_data_set_default_int(settings, S_COLOR_MIX, VORTEX_MIX_ARMS);
 
 	obs_data_set_default_double(settings, S_OPEN_END, 22.0);
 	obs_data_set_default_double(settings, S_REVEAL_START, 62.0);
@@ -485,6 +584,7 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 
 	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
 	bool previous_srgb = gs_framebuffer_srgb_enabled();
+	int i;
 
 	vec2_set(&canvas, (float)cx, (float)cy);
 	vec2_set(&origin, vortex->origin_x * (float)cx, vortex->origin_y * (float)cy);
@@ -507,12 +607,16 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 		gs_effect_set_texture(vortex->ep_a_tex, a);
 		gs_effect_set_texture(vortex->ep_b_tex, b);
 		gs_effect_set_vec4(vortex->ep_color_bright, &vortex->color_bright);
-		gs_effect_set_vec4(vortex->ep_color_deep, &vortex->color_deep);
+
+		for (i = 0; i < VORTEX_BODY_COLORS; i++)
+			gs_effect_set_vec4(vortex->ep_body[i], &vortex->body[i]);
 	} else {
 		gs_effect_set_texture_srgb(vortex->ep_a_tex, a);
 		gs_effect_set_texture_srgb(vortex->ep_b_tex, b);
 		gs_effect_set_vec4(vortex->ep_color_bright, &vortex->color_bright_srgb);
-		gs_effect_set_vec4(vortex->ep_color_deep, &vortex->color_deep_srgb);
+
+		for (i = 0; i < VORTEX_BODY_COLORS; i++)
+			gs_effect_set_vec4(vortex->ep_body[i], &vortex->body_srgb[i]);
 	}
 
 	gs_effect_set_vec2(vortex->ep_canvas, &canvas);
@@ -537,10 +641,13 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(vortex->ep_intensity, vortex->intensity);
 	gs_effect_set_float(vortex->ep_smoke_scale, vortex->smoke_scale);
 	gs_effect_set_float(vortex->ep_smoke_soft, vortex->smoke_soft);
-	gs_effect_set_float(vortex->ep_core_level, vortex->core_level);
-	gs_effect_set_float(vortex->ep_core_width, vortex->core_width);
 	gs_effect_set_float(vortex->ep_swirl_angle, swirl_angle);
 	gs_effect_set_float(vortex->ep_swirl_pull, swirl_pull);
+
+	gs_effect_set_float(vortex->ep_body_span, vortex->body_span);
+	gs_effect_set_int(vortex->ep_color_mix, vortex->color_mix);
+	gs_effect_set_float(vortex->ep_core_level, vortex->core_level);
+	gs_effect_set_float(vortex->ep_core_width, vortex->core_width);
 
 	while (gs_effect_loop(vortex->effect, "Vortex"))
 		gs_draw_sprite(NULL, 0, cx, cy);

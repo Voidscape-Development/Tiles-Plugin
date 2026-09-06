@@ -19,8 +19,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 /*
  * Checks for the vortex transition.
  *
- * The noise and phase math below mirrors data/effects/vortex_transition.effect
- * one for one, and the clamps mirror vortex_update() in src/vortex-transition.c.
+ * The noise, phase and colour math below mirrors
+ * data/effects/vortex_transition.effect one for one, and the clamps and curves
+ * mirror src/vortex-transition.c.
  * It exists so the claims the effect rests on can be checked without a GPU:
  *
  *   1. the transition starts on an untouched outgoing scene and finishes on an
@@ -37,6 +38,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  *      pixels those tests throw away had nothing to contribute
  *   6. the core ramp still lands on the values the look was tuned at when both
  *      of its sliders are left at the default
+ *   7. the body palette returns a colour the user picked - exactly the first one
+ *      when the mix is off - and never invents one in between
  */
 
 #include <math.h>
@@ -48,6 +51,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define TAU 6.2831853f
 #define FIBRES 96.0f
 #define PHASE_GAP 0.05f
+
+/* mirrors of the palette constants in the effect */
+#define MIX_GAIN 1.7f
+#define BAND_EDGE 0.12f
+#define BODY_COLORS 4
 
 /* mirrors of the core ramp constants in src/vortex-transition.c */
 #define CORE_LEVEL 1.1f
@@ -95,6 +103,13 @@ static inline float saturatef(float v)
 static inline float lerpf(float a, float b, float t)
 {
 	return a + (b - a) * t;
+}
+
+static inline float smoothstepf(float lo, float hi, float v)
+{
+	float t = saturatef((v - lo) / (hi - lo));
+
+	return t * t * (3.0f - 2.0f * t);
 }
 
 static float hash1(float px, float py)
@@ -210,6 +225,39 @@ static float reveal_amount(float px, float py, float r, float k, float reach, fl
 		soft = 0.02f;
 
 	return saturatef((k * (1.0f + 2.0f * soft) - soft - field) / soft);
+}
+
+/*
+ * body_colour(): three lerps that each start where the one before it ran out,
+ * so a whole t lands on that palette entry and a fractional one blends its two
+ * neighbours. With a single colour t is pinned at 0 and this is the first
+ * colour untouched.
+ */
+static void palette_colour(float t, const float pal[BODY_COLORS][3], float out[3])
+{
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		float c = lerpf(pal[0][i], pal[1][i], saturatef(t));
+
+		c = lerpf(c, pal[2][i], saturatef(t - 1.0f));
+		c = lerpf(c, pal[3][i], saturatef(t - 2.0f));
+		out[i] = c;
+	}
+}
+
+/* the widening the arms and radial mixes put the raw selector through */
+static float mix_gain(float m)
+{
+	return saturatef((m - 0.5f) * MIX_GAIN + 0.5f);
+}
+
+/* the snap the banded mix applies to the palette position */
+static float band_snap(float t)
+{
+	float base = floorf(t);
+
+	return base + smoothstepf(1.0f - BAND_EDGE, 1.0f, t - base);
 }
 
 /* ------------------------------------------------------------------ */
@@ -643,6 +691,93 @@ static void check_core_ramp(void)
 	}
 }
 
+/*
+ * 10. The body palette. A single colour has to come back bit for bit unchanged,
+ * because that is the whole of the previous behaviour; a whole palette position
+ * has to be the colour at that slot rather than something near it; and anything
+ * in between has to stay inside the two entries it sits between, so a mix can
+ * never invent a colour the user did not pick.
+ */
+static void check_palette(void)
+{
+	static const float pal[BODY_COLORS][3] = {
+		{0.48f, 0.25f, 0.82f},
+		{0.25f, 0.71f, 0.82f},
+		{0.82f, 0.25f, 0.62f},
+		{0.25f, 0.35f, 0.82f},
+	};
+	int i, j, c;
+
+	for (i = 0; i < 3; i++) {
+		float out[3];
+
+		palette_colour(0.0f, pal, out);
+		check(out[i] == pal[0][i], "single colour body drifted: channel %d got %g want %g", i, (double)out[i],
+		      (double)pal[0][i]);
+	}
+
+	for (i = 0; i < BODY_COLORS; i++) {
+		float out[3];
+
+		palette_colour((float)i, pal, out);
+		for (c = 0; c < 3; c++)
+			check(out[c] == pal[i][c], "palette entry %d is not itself: channel %d got %g want %g", i, c,
+			      (double)out[c], (double)pal[i][c]);
+	}
+
+	for (i = 0; i + 1 < BODY_COLORS; i++) {
+		for (j = 0; j <= 32; j++) {
+			float f = (float)j / 32.0f;
+			float out[3];
+
+			palette_colour((float)i + f, pal, out);
+
+			for (c = 0; c < 3; c++) {
+				float lo = fminf(pal[i][c], pal[i + 1][c]);
+				float hi = fmaxf(pal[i][c], pal[i + 1][c]);
+
+				check(out[c] >= lo - 1e-6f && out[c] <= hi + 1e-6f,
+				      "palette left its segment: t %g channel %d got %g not in [%g, %g]",
+				      (double)((float)i + f), c, (double)out[c], (double)lo, (double)hi);
+			}
+		}
+	}
+}
+
+/*
+ * 11. The mix selectors. The gain has to stay inside 0..1 so it cannot index
+ * past the palette, and the banded snap has to land exactly on whole entries,
+ * stay inside the span, and never run backwards - a snap that overshot would
+ * put a colour the band does not belong to along its edge.
+ */
+static void check_mix_selectors(void)
+{
+	int i;
+
+	for (i = 0; i <= 200; i++) {
+		float m = -0.5f + 2.0f * (float)i / 200.0f;
+		float g = mix_gain(m);
+
+		check(g >= 0.0f && g <= 1.0f, "mix selector left 0..1: m %g got %g", (double)m, (double)g);
+	}
+
+	for (i = 0; i <= 3; i++)
+		check(band_snap((float)i) == (float)i, "banded mix does not land on entry %d: got %g", i,
+		      (double)band_snap((float)i));
+
+	for (i = 0; i <= 600; i++) {
+		float span = 3.0f;
+		float t = span * (float)i / 600.0f;
+		float snapped = band_snap(t);
+		float previous = band_snap(span * (float)(i > 0 ? i - 1 : 0) / 600.0f);
+
+		check(snapped >= 0.0f && snapped <= span, "banded mix left the palette: t %g got %g", (double)t,
+		      (double)snapped);
+		check(snapped >= previous - 1e-6f, "banded mix ran backwards: t %g got %g after %g", (double)t,
+		      (double)snapped, (double)previous);
+	}
+}
+
 int main(void)
 {
 	check_start_is_clean();
@@ -655,6 +790,8 @@ int main(void)
 	check_reveal_bounds();
 	check_glow_envelope();
 	check_core_ramp();
+	check_palette();
+	check_mix_selectors();
 
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;

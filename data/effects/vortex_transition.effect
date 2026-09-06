@@ -33,8 +33,9 @@
  * doubt. That is what keeps the cost of the transition on the pixels that can
  * actually see it - see PSVortex().
  *
- * NOTE: the phase schedule, the reveal threshold and the bounds the early exits
- * rest on are mirrored in test/test-vortex.c. Keep the two in sync.
+ * NOTE: the phase schedule, the reveal threshold, the palette and the bounds
+ * the early exits rest on are mirrored in test/test-vortex.c. Keep the two in
+ * sync.
  */
 
 uniform float4x4 ViewProj;
@@ -76,6 +77,12 @@ uniform float swirl_pull;  /* scene zoom that goes with it; 1 is no zoom */
 
 uniform float4 color_bright; /* hot core colour */
 uniform float4 color_deep;   /* body colour of the arms */
+uniform float4 color_deep2;  /* the rest of the body palette; only the first */
+uniform float4 color_deep3;  /* body_span + 1 of the four are ever reached */
+uniform float4 color_deep4;
+
+uniform float body_span; /* body colour count minus one; 0 is a single colour */
+uniform int color_mix;   /* 0 along the arms, 1 centre to edge, 2 banded arms */
 
 uniform float core_level; /* energy at which the core colour starts to take over */
 uniform float core_width; /* energy range it takes to finish taking over */
@@ -104,6 +111,19 @@ VertData VSDefault(VertData v_in)
 /* Angular cells around the portal rim. Integral, and stays integral as the
  * octaves double it, so the fibres meet cleanly where the circle closes. */
 #define FIBRES 96.0
+
+#define MIX_ARMS   0
+#define MIX_RADIAL 1
+#define MIX_BANDS  2
+
+/* A single octave of value noise spends most of its time near its own mean, so
+ * the palette selector is widened about the midpoint. Without this the first
+ * and last colour of a mix would only ever appear as a tint. */
+#define MIX_GAIN 1.7
+
+/* How much of a banded step is spent crossing to the next colour. Small enough
+ * that the bands read as flat, wide enough that the edge is not a stair. */
+#define BAND_EDGE 0.12
 
 /* ------------------------------------------------------------------ */
 /* noise                                                              */
@@ -186,6 +206,68 @@ float fbm(float2 p)
 	v += 0.0625 * vnoise(p);
 
 	return v / 0.9375;
+}
+
+/* ------------------------------------------------------------------ */
+/* body palette                                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The body of the vortex can hold up to four colours. body_span is the count
+ * minus one and t runs 0..body_span, so entry i is at t = i.
+ *
+ * Three unconditional lerps rather than an indexed lookup: each one only starts
+ * once the one before it has run out, so a whole t lands exactly on that entry
+ * and a fractional one is a two-colour blend of its neighbours - no dynamic
+ * indexing, and nothing to go wrong on a driver that dislikes it. The unused
+ * tail of the palette is unreachable rather than merely unset: with a single
+ * colour body_span is 0, every saturate() below is 0 and this is color_deep
+ * exactly, bit for bit what the effect did before the palette existed.
+ */
+float3 body_colour(float t)
+{
+	float3 c = lerp(color_deep.rgb, color_deep2.rgb, saturate(t));
+
+	c = lerp(c, color_deep3.rgb, saturate(t - 1.0));
+	c = lerp(c, color_deep4.rgb, saturate(t - 2.0));
+
+	return c;
+}
+
+/*
+ * Where in the palette a pixel sits, 0..body_span.
+ *
+ * q is the log-polar coordinate the arms themselves are drawn from, so it
+ * already carries the twist and the spin: colour patches lie along the arms and
+ * travel with them instead of sitting still while the vortex turns underneath.
+ * One octave is enough - the palette wants broad regions, not detail - and it
+ * is sampled on the same wrapped lattice as the arms, so a patch is about an
+ * arm across and the ring closes with no seam.
+ */
+float body_mix(float2 q, float r)
+{
+	float m;
+	float t;
+
+	if (color_mix == MIX_RADIAL)
+		m = saturate(r / reach);
+	else
+		m = saturate((vnoise_p(float2(q.x, q.y * 0.35 + 4.9), arms) - 0.5) * MIX_GAIN + 0.5);
+
+	t = m * body_span;
+
+	/* Bands snap to whole entries, with a thin ramp across the boundary:
+	 * the colours stay flat, but the edge between them is filtered rather
+	 * than aliasing along a spiral. Written out rather than reached through
+	 * smoothstep(), which no effect in OBS itself uses. */
+	if (color_mix == MIX_BANDS) {
+		float base = floor(t);
+		float edge = saturate((t - base - (1.0 - BAND_EDGE)) / BAND_EDGE);
+
+		t = base + edge * edge * (3.0 - 2.0 * edge);
+	}
+
+	return t;
 }
 
 /* ------------------------------------------------------------------ */
@@ -273,6 +355,7 @@ float3 vortex_colour(float2 p, float r, float ang, float rim)
 	float arm = saturate((ridge - 0.5) * 2.0);
 	float radial = saturate(1.0 - r / (reach * 1.15));
 	float e = arm * arm * 1.8 * radial * radial;
+	float3 body = color_deep.rgb;
 	float3 col;
 
 	/* the hot point at the eye of the spiral */
@@ -296,11 +379,16 @@ float3 vortex_colour(float2 p, float r, float ang, float rim)
 	 */
 	e += rim * intensity * iris_k;
 
-	/* dim energy is deep purple body, hot energy blows out towards the core
+	/* A single colour skips the selector outright, so nothing below is paid
+	 * for by anyone who has not asked for a mix. */
+	if (body_span > 0.0)
+		body = body_colour(body_mix(q, r));
+
+	/* dim energy is the body colour, hot energy blows out towards the core
 	 * colour - one ramp doing the work of a bloom pass. core_level is where
 	 * that starts and core_width is how long it takes, so the pair set how
 	 * far the core floods the arms when the vortex flashes. */
-	col = color_deep.rgb * e;
+	col = body * e;
 	return lerp(col, color_bright.rgb, saturate((e - core_level) / max(core_width, 0.0001)));
 }
 
