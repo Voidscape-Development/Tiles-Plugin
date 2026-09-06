@@ -26,8 +26,15 @@
  * the cell index back into it; every octave doubles the period along with the
  * frequency, so an integral period stays integral all the way down.
  *
- * NOTE: the phase schedule and the reveal threshold are mirrored in
- * test/test-vortex.c. Keep the two in sync when changing phase_cover().
+ * Every phase is bounded before it is evaluated. iris_edge() and the reveal
+ * field are both bounded to 0..1 by construction, so the radius alone settles
+ * whether a pixel is fully covered or not covered at all, and the noise behind
+ * either one is only worth running inside the band where the answer is in
+ * doubt. That is what keeps the cost of the transition on the pixels that can
+ * actually see it - see PSVortex().
+ *
+ * NOTE: the phase schedule, the reveal threshold and the bounds the early exits
+ * rest on are mirrored in test/test-vortex.c. Keep the two in sync.
  */
 
 uniform float4x4 ViewProj;
@@ -44,6 +51,13 @@ uniform float open_end;      /* progress at which the portal fills the canvas */
 uniform float reveal_start;  /* progress at which the incoming scene starts back */
 uniform float cut;           /* progress at which the scenes are swapped */
 
+/* Phase clocks and the light envelope. All three are functions of progress and
+ * the phase splits alone, so they are worked out once on the CPU rather than
+ * per pixel - see vortex_callback() in src/vortex-transition.c. */
+uniform float iris_k;   /* portal growth, 0..1; 1 from open_end onwards */
+uniform float reveal_k; /* reveal progress, 0..1; 0 until reveal_start */
+uniform float glow;     /* brightness envelope over the whole transition */
+
 uniform float arms;   /* spiral arm count; integral, so the noise stays seamless */
 uniform float twist;  /* angular offset per unit of log(r) - spiral tightness */
 uniform float spin;   /* turns the spiral makes over the whole transition */
@@ -55,8 +69,10 @@ uniform float intensity; /* overall brightness of the generated light */
 uniform float smoke_scale; /* reveal noise frequency, cycles per field unit */
 uniform float smoke_soft;  /* reveal threshold width */
 
-uniform float warp;      /* peak scene twist, radians; 0 disables the whole path */
-uniform float warp_pull; /* peak scene zoom that goes with the twist */
+/* Resolved for whichever scene is showing this frame, so the shader neither
+ * shapes the curve nor picks the sign. 0 leaves the scene untouched. */
+uniform float swirl_angle; /* scene twist, radians */
+uniform float swirl_pull;  /* scene zoom that goes with it; 1 is no zoom */
 
 uniform float4 color_bright; /* hot core colour */
 uniform float4 color_deep;   /* body colour of the arms */
@@ -175,7 +191,7 @@ float fbm(float2 p)
 
 /* Two bands: broad lobes for the shape of the tear, fine chatter for the
  * fibres along it. Both wrap, and the result stays inside 0..1, which is what
- * iris_radius() leans on. */
+ * iris_radius() and the bound in PSVortex() both lean on. */
 float iris_edge(float ang)
 {
 	float lobes = fbm_p(float2(ang * FIBRES / TAU, 3.7), FIBRES);
@@ -196,6 +212,13 @@ float iris_edge(float ang)
  * width in field units, which is a reasonable fray on a portal that has grown
  * to fill the canvas and a sea urchin on one that is still a few pixels wide.
  * Scaling it keeps the tear the same fraction of the rim the whole way out.
+ *
+ * Because iris_edge() is bounded to 0..1, the result is bounded too:
+ *
+ *     k * reach  <=  iris_radius(ang, k)  <=  k * reach * (1 + fringe)
+ *
+ * for every angle. PSVortex() uses the upper bound to throw away the pixels
+ * outside the portal without evaluating the noise at all.
  */
 float iris_radius(float ang, float k)
 {
@@ -211,7 +234,11 @@ float iris_radius(float ang, float k)
  * smoke does rather than breaking up into blobs.
  *
  * Like iris_radius() the ends are exact by construction: field never leaves
- * 0..1, so k = 0 gives 0 and k = 1 gives 1 for every pixel.
+ * 0..1, so k = 0 gives 0 and k = 1 gives 1 for every pixel. The noise term is
+ * bounded as well, which is what lets PSVortex() settle the two ends of the
+ * threshold from the radius alone:
+ *
+ *     0.45 * saturate(r / reach)  <=  field  <=  0.55 + 0.45 * saturate(r / reach)
  */
 float reveal_amount(float2 p, float r, float k)
 {
@@ -227,20 +254,6 @@ float reveal_amount(float2 p, float r, float k)
 /* ------------------------------------------------------------------ */
 /* the vortex itself                                                  */
 /* ------------------------------------------------------------------ */
-
-/*
- * Brightness envelope over the transition. The light ramps up as the portal
- * opens, peaks as it fills the canvas, then decays across the hold and the
- * reveal so that what is left carving up the incoming scene is dark smoke
- * rather than a bright spiral.
- */
-float glow_envelope()
-{
-	float rise = saturate(progress / max(open_end, 0.0001));
-	float fall = 1.0 - saturate((progress - open_end) / max(1.0 - open_end, 0.0001));
-
-	return rise * rise * lerp(0.06, 1.0, pow(fall, 1.8));
-}
 
 float3 vortex_colour(float2 p, float r, float ang, float rim)
 {
@@ -265,7 +278,7 @@ float3 vortex_colour(float2 p, float r, float ang, float rim)
 	/* anamorphic streak across it, the one deliberately lens-like flourish */
 	e += 0.7 * exp(-abs(p.y) * 70.0) * exp(-r * 2.0);
 
-	e *= intensity * glow_envelope();
+	e *= intensity * glow;
 
 	/*
 	 * The rim is added after the envelope rather than through it. The
@@ -274,8 +287,11 @@ float3 vortex_colour(float2 p, float r, float ang, float rim)
 	 * exactly when the portal is small, and running it through the same curve
 	 * put the light where the effect does not need it and took it away from
 	 * where it does.
+	 *
+	 * iris_k is that same rise: it is pinned at 1 once the portal has opened,
+	 * and rim is 0 from then on, so the two agree everywhere it matters.
 	 */
-	e += rim * intensity * saturate(progress / max(open_end, 0.0001));
+	e += rim * intensity * iris_k;
 
 	/* dim energy is deep purple body, hot energy blows out towards the core
 	 * colour - one ramp doing the work of a bloom pass */
@@ -291,8 +307,8 @@ float3 vortex_colour(float2 p, float r, float ang, float rim)
  * Optional swirl. The reference this was modelled on leaves the scenes flat
  * and only composites over them, so this is off by default; when it is on the
  * outgoing scene screws down into the origin and the incoming one unwinds back
- * out of it. Both ends are identity - amt and pull are handed in at zero at
- * progress 0 and 1 - so the transition still starts and finishes on an
+ * out of it. Both ends are identity - the angle is handed in at zero on the
+ * first and last frame - so the transition still starts and finishes on an
  * untouched frame.
  */
 float2 swirl_uv(float2 p, float r, float amt, float pull)
@@ -304,6 +320,33 @@ float2 swirl_uv(float2 p, float r, float amt, float pull)
 	float2 q = float2(p.x * ca - p.y * sa, p.x * sa + p.y * ca) * pull;
 
 	return (q * unit_px + origin_px) / canvas;
+}
+
+/*
+ * Whichever scene is showing this frame.
+ *
+ * The swirl is skipped outright at a zero angle rather than run with one: the
+ * round trip out to field units and back is only equal to uv to within floating
+ * point, and a scene that is meant to be untouched should be sampled on the
+ * coordinate it came in on, not half a texel off it.
+ *
+ * SampleLevel, not Sample: every caller below reaches this on some pixels only,
+ * and a fetch that takes gradients has to be pulled back out of the branch to
+ * get them, which would undo the skipping. Both scenes arrive as canvas sized
+ * render targets with no mip chain, so level 0 is the level Sample was already
+ * resolving to and the result is unchanged.
+ */
+float4 scene_sample(float2 uv, float2 p, float r)
+{
+	float2 uv_s = uv;
+
+	if (swirl_angle != 0.0)
+		uv_s = swirl_uv(p, r, swirl_angle, swirl_pull);
+
+	if (progress < cut)
+		return a_tex.SampleLevel(textureSampler, uv_s, 0.0);
+
+	return b_tex.SampleLevel(textureSampler, uv_s, 0.0);
 }
 
 float4 PSVortex(VertData v_in) : TARGET
@@ -318,49 +361,74 @@ float4 PSVortex(VertData v_in) : TARGET
 	float radius = 0.0;
 	float cover;
 	float rim = 0.0;
-	float4 scene;
+	float4 lit;
 
 	/*
-	 * Coverage is worked out first so the generated light can be skipped on
-	 * the pixels it would be multiplied away on. That is most of the canvas
-	 * while the portal is still small and again once the reveal has opened up,
-	 * and the branch is coherent because coverage is flat across both of those
-	 * regions. It is worth taking: the spiral behind it is four octaves of
-	 * wrapped noise, an exp and a pow, several times the cost of the coverage
-	 * test itself.
+	 * Coverage first, and as much of it as possible from the radius alone.
+	 * The generated light and the scene underneath it are both skippable -
+	 * one is multiplied away where coverage is 0, the other where it is 1 -
+	 * and so is the noise that decides coverage itself, wherever the bounds
+	 * on that noise already settle the answer.
+	 *
+	 * Every test below is on the radius alone, so neighbouring pixels agree
+	 * and the branches are worth taking: what they carve the canvas into is
+	 * a disc, a ring and the band between them, not a per-pixel scatter.
 	 */
-	if (progress < reveal_start) {
-		float k = saturate(progress / max(open_end, 0.0001));
+	if (progress < open_end) {
+		/*
+		 * Opening. iris_radius() never exceeds this bound, so anything
+		 * past it is outside the portal whatever the rim noise is
+		 * doing - and that is most of the canvas for most of the phase.
+		 */
+		float outer = iris_k * reach * (1.0 + fringe);
 
-		radius = iris_radius(ang, k);
-		cover = saturate((radius - r) / aa + 0.5);
+		if (r >= outer + 0.5 * aa) {
+			cover = 0.0;
+		} else {
+			radius = iris_radius(ang, iris_k);
+			cover = saturate((radius - r) / aa + 0.5);
+		}
+	} else if (progress < reveal_start) {
+		/*
+		 * The hold, and the cheapest phase there is: at k = 1 the portal
+		 * boundary is at or beyond the reach for every angle, and the
+		 * reach is measured to the furthest corner of the canvas, so
+		 * every pixel is inside it. Coverage is 1 by construction, which
+		 * leaves neither rim noise nor a scene to sample - the two most
+		 * expensive things the shader can do, both of them dead weight
+		 * across the whole canvas for the whole of the phase.
+		 *
+		 * This is also what the scene swap in the middle of the hold
+		 * rests on, and it is now exact. Working coverage out from the
+		 * noise left one pixel able to dip to 0.5: the furthest corner,
+		 * at an angle where the rim noise peaked at 1, which is the only
+		 * place the cut could ever have shown through.
+		 */
+		cover = 1.0;
 	} else {
-		float k = saturate((progress - reveal_start) / max(1.0 - reveal_start, 0.0001));
+		/*
+		 * The reveal. The noise term in the threshold is bounded to
+		 * 0..1, so with rr = saturate(r / reach) the field lies between
+		 * 0.45 * rr and 0.55 + 0.45 * rr, and both ends of the reveal
+		 * can be settled without the three fBms the smoke costs. The
+		 * reveal erodes outwards, so what those bounds carve out is the
+		 * inner disc that is already fully back and the outer ring that
+		 * has not started; only the tendrils in between are evaluated.
+		 */
+		float soft = max(smoke_soft, 0.02);
+		float rr = saturate(r / reach);
+		float spent = reveal_k * (1.0 + 2.0 * soft) - 2.0 * soft;
 
-		cover = 1.0 - reveal_amount(p, r, k);
-	}
-
-	/*
-	 * d is zero on the first and last frame of the transition, and the swirl
-	 * is skipped outright there rather than run with a zero angle. The round
-	 * trip out to field units and back is only equal to uv to within floating
-	 * point, and a scene that is meant to be untouched should be sampled on
-	 * the coordinate it came in on, not half a texel off it.
-	 */
-	if (progress < cut) {
-		float d = saturate(progress / max(cut, 0.0001));
-		float2 uv_a = (warp > 0.0 && d > 0.0) ? swirl_uv(p, r, warp * pow(d, 1.5), 1.0 + warp_pull * d) : uv;
-
-		scene = a_tex.Sample(textureSampler, uv_a);
-	} else {
-		float d = saturate((1.0 - progress) / max(1.0 - cut, 0.0001));
-		float2 uv_b = (warp > 0.0 && d > 0.0) ? swirl_uv(p, r, -warp * pow(d, 1.5), 1.0 + warp_pull * d) : uv;
-
-		scene = b_tex.Sample(textureSampler, uv_b);
+		if (0.55 + 0.45 * rr <= spent)
+			cover = 0.0;
+		else if (0.45 * rr >= spent + soft)
+			cover = 1.0;
+		else
+			cover = 1.0 - reveal_amount(p, r, reveal_k);
 	}
 
 	if (cover <= 0.0)
-		return scene;
+		return scene_sample(uv, p, r);
 
 	/*
 	 * Only the opening portal has a lit rim to track; once it has swallowed
@@ -379,7 +447,14 @@ float4 PSVortex(VertData v_in) : TARGET
 		rim = exp(-(dr > 0.0 ? dr / 0.30 : -dr / 0.05)) * (0.45 + 1.9 * ray * ray);
 	}
 
-	return lerp(scene, float4(vortex_colour(p, r, ang, rim), 1.0), cover);
+	lit = float4(vortex_colour(p, r, ang, rim), 1.0);
+
+	/* An opaque pixel shows none of the scene behind it, so the sample is
+	 * multiplied away. Return before taking it. */
+	if (cover >= 1.0)
+		return lit;
+
+	return lerp(scene_sample(uv, p, r), lit, cover);
 }
 
 technique Vortex

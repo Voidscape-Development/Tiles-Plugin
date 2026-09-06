@@ -153,6 +153,11 @@ opaque edge to edge for the whole hold so the scene swap cannot show, that the
 noise wrapped around the circle actually meets itself and leaves no seam, and
 that the portal is always sized past the furthest corner of the canvas.
 
+It also covers the bounds the shader uses to skip work: the portal boundary
+never leaves the band the radius test assumes it is in, and the reveal really is
+finished below its low bound and untouched above its high one, so the pixels
+those tests throw away had nothing to contribute.
+
 Neither needs OBS or a GPU:
 
 ```sh

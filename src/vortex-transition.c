@@ -26,8 +26,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * and none of the tile properties would mean anything.
  *
  * The look is generated in data/effects/vortex_transition.effect; this file
- * only turns properties into uniforms and works out the geometry that depends
- * on the canvas size.
+ * only turns properties into uniforms, works out the geometry that depends on
+ * the canvas size, and evaluates the handful of curves that are the same for
+ * every pixel in a frame so the shader does not have to.
  */
 
 #include <obs-module.h>
@@ -78,6 +79,9 @@ struct vortex_info {
 	gs_eparam_t *ep_open_end;
 	gs_eparam_t *ep_reveal_start;
 	gs_eparam_t *ep_cut;
+	gs_eparam_t *ep_iris_k;
+	gs_eparam_t *ep_reveal_k;
+	gs_eparam_t *ep_glow;
 	gs_eparam_t *ep_arms;
 	gs_eparam_t *ep_twist;
 	gs_eparam_t *ep_spin;
@@ -86,8 +90,8 @@ struct vortex_info {
 	gs_eparam_t *ep_intensity;
 	gs_eparam_t *ep_smoke_scale;
 	gs_eparam_t *ep_smoke_soft;
-	gs_eparam_t *ep_warp;
-	gs_eparam_t *ep_warp_pull;
+	gs_eparam_t *ep_swirl_angle;
+	gs_eparam_t *ep_swirl_pull;
 	gs_eparam_t *ep_color_bright;
 	gs_eparam_t *ep_color_deep;
 
@@ -211,6 +215,9 @@ static void *vortex_create(obs_data_t *settings, obs_source_t *source)
 	vortex->ep_open_end = gs_effect_get_param_by_name(effect, "open_end");
 	vortex->ep_reveal_start = gs_effect_get_param_by_name(effect, "reveal_start");
 	vortex->ep_cut = gs_effect_get_param_by_name(effect, "cut");
+	vortex->ep_iris_k = gs_effect_get_param_by_name(effect, "iris_k");
+	vortex->ep_reveal_k = gs_effect_get_param_by_name(effect, "reveal_k");
+	vortex->ep_glow = gs_effect_get_param_by_name(effect, "glow");
 	vortex->ep_arms = gs_effect_get_param_by_name(effect, "arms");
 	vortex->ep_twist = gs_effect_get_param_by_name(effect, "twist");
 	vortex->ep_spin = gs_effect_get_param_by_name(effect, "spin");
@@ -219,8 +226,8 @@ static void *vortex_create(obs_data_t *settings, obs_source_t *source)
 	vortex->ep_intensity = gs_effect_get_param_by_name(effect, "intensity");
 	vortex->ep_smoke_scale = gs_effect_get_param_by_name(effect, "smoke_scale");
 	vortex->ep_smoke_soft = gs_effect_get_param_by_name(effect, "smoke_soft");
-	vortex->ep_warp = gs_effect_get_param_by_name(effect, "warp");
-	vortex->ep_warp_pull = gs_effect_get_param_by_name(effect, "warp_pull");
+	vortex->ep_swirl_angle = gs_effect_get_param_by_name(effect, "swirl_angle");
+	vortex->ep_swirl_pull = gs_effect_get_param_by_name(effect, "swirl_pull");
 	vortex->ep_color_bright = gs_effect_get_param_by_name(effect, "color_bright");
 	vortex->ep_color_deep = gs_effect_get_param_by_name(effect, "color_deep");
 
@@ -368,6 +375,49 @@ static float vortex_reach(float ox, float oy, float cx, float cy, float unit_px)
 	return fmaxf(max_radius / unit_px, 0.0001f);
 }
 
+/*
+ * Brightness envelope over the transition. The light ramps up as the portal
+ * opens, peaks as it fills the canvas, then decays across the hold and the
+ * reveal so that what is left carving up the incoming scene is dark smoke
+ * rather than a bright spiral.
+ *
+ * The rise is the portal clock itself, which the shader wants anyway, so it is
+ * passed in rather than worked out twice.
+ */
+static float vortex_glow(float rise, float progress, float open_end)
+{
+	float fall = 1.0f - clampf((progress - open_end) / fmaxf(1.0f - open_end, 0.0001f), 0.0f, 1.0f);
+
+	/* written the way the shader's lerp(0.06, 1.0, x) expands, so moving the
+	 * curve off the GPU did not move the curve */
+	return rise * rise * (0.06f + (1.0f - 0.06f) * powf(fall, 1.8f));
+}
+
+/*
+ * The swirl for whichever scene is showing this frame. Both ends of the
+ * transition are identity: at progress 0 and 1 the travel is zero, so the angle
+ * is zero and the shader leaves the scene coordinate alone.
+ */
+static void vortex_swirl(const struct vortex_info *vortex, float t, float cut, float *angle, float *pull)
+{
+	float travel;
+
+	if (vortex->warp <= 0.0f) {
+		*angle = 0.0f;
+		*pull = 1.0f;
+		return;
+	}
+
+	if (t < cut)
+		travel = clampf(t / fmaxf(cut, 0.0001f), 0.0f, 1.0f);
+	else
+		travel = clampf((1.0f - t) / fmaxf(1.0f - cut, 0.0001f), 0.0f, 1.0f);
+
+	/* the outgoing scene screws in, the incoming one unwinds back out */
+	*angle = vortex->warp * powf(travel, 1.5f) * (t < cut ? 1.0f : -1.0f);
+	*pull = 1.0f + vortex->warp_pull * travel;
+}
+
 static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t, uint32_t cx, uint32_t cy)
 {
 	struct vortex_info *vortex = data;
@@ -375,6 +425,15 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	struct vec2 origin;
 	float unit_px = fmaxf((float)cy * 0.5f, 1.0f);
 	float reach;
+	float iris_k;
+	float reveal_k;
+	float swirl_angle;
+	float swirl_pull;
+
+	/* The scenes are swapped halfway through the hold, where the overlay is
+	 * opaque from edge to edge and the cut cannot show. */
+	float cut = (vortex->open_end + vortex->reveal_start) * 0.5f;
+
 	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
 	bool previous_srgb = gs_framebuffer_srgb_enabled();
 
@@ -382,6 +441,16 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	vec2_set(&origin, vortex->origin_x * (float)cx, vortex->origin_y * (float)cy);
 
 	reach = vortex_reach(origin.x, origin.y, (float)cx, (float)cy, unit_px);
+
+	/*
+	 * The phase clocks, the light envelope and the swirl are the same for
+	 * every pixel in the frame, so they are worked out here instead of being
+	 * rebuilt a couple of million times in the shader. The curves are
+	 * unchanged; only where they are evaluated is.
+	 */
+	iris_k = clampf(t / fmaxf(vortex->open_end, 0.0001f), 0.0f, 1.0f);
+	reveal_k = clampf((t - vortex->reveal_start) / fmaxf(1.0f - vortex->reveal_start, 0.0001f), 0.0f, 1.0f);
+	vortex_swirl(vortex, t, cut, &swirl_angle, &swirl_pull);
 
 	gs_enable_framebuffer_srgb(!nonlinear);
 
@@ -405,10 +474,11 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(vortex->ep_progress, t);
 	gs_effect_set_float(vortex->ep_open_end, vortex->open_end);
 	gs_effect_set_float(vortex->ep_reveal_start, vortex->reveal_start);
+	gs_effect_set_float(vortex->ep_cut, cut);
 
-	/* The scenes are swapped halfway through the hold, where the overlay is
-	 * opaque from edge to edge and the cut cannot show. */
-	gs_effect_set_float(vortex->ep_cut, (vortex->open_end + vortex->reveal_start) * 0.5f);
+	gs_effect_set_float(vortex->ep_iris_k, iris_k);
+	gs_effect_set_float(vortex->ep_reveal_k, reveal_k);
+	gs_effect_set_float(vortex->ep_glow, vortex_glow(iris_k, t, vortex->open_end));
 
 	gs_effect_set_float(vortex->ep_arms, vortex->arms);
 	gs_effect_set_float(vortex->ep_twist, vortex->twist);
@@ -418,8 +488,8 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(vortex->ep_intensity, vortex->intensity);
 	gs_effect_set_float(vortex->ep_smoke_scale, vortex->smoke_scale);
 	gs_effect_set_float(vortex->ep_smoke_soft, vortex->smoke_soft);
-	gs_effect_set_float(vortex->ep_warp, vortex->warp);
-	gs_effect_set_float(vortex->ep_warp_pull, vortex->warp_pull);
+	gs_effect_set_float(vortex->ep_swirl_angle, swirl_angle);
+	gs_effect_set_float(vortex->ep_swirl_pull, swirl_pull);
 
 	while (gs_effect_loop(vortex->effect, "Vortex"))
 		gs_draw_sprite(NULL, 0, cx, cy);

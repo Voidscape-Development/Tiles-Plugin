@@ -31,6 +31,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  *      where the circle closes
  *   4. the reach covers the far corner, so an offset centre does not leave a
  *      corner of the outgoing scene showing when the scenes swap
+ *   5. the bounds the shader skips work on are sound: the portal boundary never
+ *      leaves the band the radius test assumes, and the reveal really is
+ *      finished below its low bound and untouched above its high one, so the
+ *      pixels those tests throw away had nothing to contribute
  */
 
 #include <math.h>
@@ -203,6 +207,15 @@ static float reveal_amount(float px, float py, float r, float k, float reach, fl
 /* ------------------------------------------------------------------ */
 /* mirror of vortex-transition.c                                      */
 /* ------------------------------------------------------------------ */
+
+/* the light envelope, which the host now evaluates once a frame */
+static float glow_for(float progress, float open_end)
+{
+	float rise = saturatef(progress / fmaxf(open_end, 0.0001f));
+	float fall = 1.0f - saturatef((progress - open_end) / fmaxf(1.0f - open_end, 0.0001f));
+
+	return rise * rise * (0.06f + (1.0f - 0.06f) * powf(fall, 1.8f));
+}
 
 static float reach_for(float ox, float oy, float cx, float cy, float unit_px)
 {
@@ -435,6 +448,144 @@ static void check_reach_covers_canvas(void)
 	}
 }
 
+/*
+ * 6. The portal boundary stays inside the band the shader's radius test
+ * assumes. iris_edge() is a saturate(), so the noise can only ever eat into an
+ * oversized radius, and the boundary is therefore between k * reach and
+ * k * reach * (1 + fringe) at every angle. PSVortex() throws away everything
+ * past the upper bound without evaluating the rim noise at all, which is only
+ * sound while this holds.
+ */
+static void check_iris_bounds(void)
+{
+	static const float ks[] = {0.05f, 0.25f, 0.5f, 0.8f, 1.0f};
+	size_t ri, fi, ki;
+	int a;
+
+	for (ri = 0; ri < sizeof(reaches) / sizeof(*reaches); ri++) {
+		for (fi = 0; fi < sizeof(roughness) / sizeof(*roughness); fi++) {
+			for (ki = 0; ki < sizeof(ks) / sizeof(*ks); ki++) {
+				float k = ks[ki];
+				float lo = k * reaches[ri];
+				float hi = lo * (1.0f + roughness[fi]);
+				float under = 1e30f;
+				float over = -1e30f;
+
+				for (a = 0; a < 2048; a++) {
+					float ang = -3.14159265f + 2.0f * 3.14159265f * (float)a / 2048.0f;
+					float radius = iris_radius(ang, k, reaches[ri], roughness[fi]);
+
+					if (radius < under)
+						under = radius;
+					if (radius > over)
+						over = radius;
+				}
+
+				check(under >= lo - 1e-4f,
+				      "portal boundary below its bound: k %g reach %g "
+				      "roughness %g got %g want >= %g",
+				      (double)k, (double)reaches[ri], (double)roughness[fi], (double)under, (double)lo);
+				check(over <= hi + 1e-4f,
+				      "portal boundary past its bound: k %g reach %g "
+				      "roughness %g got %g want <= %g",
+				      (double)k, (double)reaches[ri], (double)roughness[fi], (double)over, (double)hi);
+			}
+		}
+	}
+}
+
+/*
+ * 7. The two radius tests the reveal skips work on are sound. The noise term is
+ * bounded to 0..1, so the field lies between 0.45 * rr and 0.55 + 0.45 * rr;
+ * below the low bound the pixel is fully back and above the high one it has not
+ * started, and in both cases the smoke does not need evaluating. Both are
+ * checked against the real noise, and both have to fire on some pixels or the
+ * check would be passing on an empty set.
+ */
+static void check_reveal_bounds(void)
+{
+	static const float softs[] = {0.05f, 0.3f, 0.8f};
+	static const float scales[] = {0.5f, 2.5f, 8.0f};
+	static const float ks[] = {0.0f, 0.15f, 0.35f, 0.5f, 0.7f, 0.9f, 1.0f};
+	const float reach = 2.5f;
+	long spent_hits = 0;
+	long held_hits = 0;
+	size_t si, ci, ki;
+	int x, y;
+
+	for (si = 0; si < sizeof(softs) / sizeof(*softs); si++) {
+		for (ci = 0; ci < sizeof(scales) / sizeof(*scales); ci++) {
+			for (ki = 0; ki < sizeof(ks) / sizeof(*ks); ki++) {
+				float soft = softs[si];
+				float k = ks[ki];
+				float spent = k * (1.0f + 2.0f * soft) - 2.0f * soft;
+
+				for (y = 0; y < 64; y++) {
+					for (x = 0; x < 64; x++) {
+						float px = -2.5f + 5.0f * (float)x / 63.0f;
+						float py = -2.5f + 5.0f * (float)y / 63.0f;
+						float r = sqrtf(px * px + py * py);
+						float rr = saturatef(r / reach);
+						float got;
+
+						if (0.55f + 0.45f * rr <= spent) {
+							got = reveal_amount(px, py, r, k, reach, scales[ci], soft);
+							spent_hits++;
+							check(got == 1.0f,
+							      "reveal not finished below its bound: k %g soft "
+							      "%g r %g got %g",
+							      (double)k, (double)soft, (double)r, (double)got);
+						} else if (0.45f * rr >= spent + soft) {
+							got = reveal_amount(px, py, r, k, reach, scales[ci], soft);
+							held_hits++;
+							check(got == 0.0f,
+							      "reveal started above its bound: k %g soft %g r "
+							      "%g got %g",
+							      (double)k, (double)soft, (double)r, (double)got);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	check(spent_hits > 0, "no pixel ever reached the fully revealed bound");
+	check(held_hits > 0, "no pixel ever reached the still hidden bound");
+}
+
+/*
+ * 8. The light envelope, which the host now works out once a frame instead of
+ * the shader working it out per pixel. Nothing may light up before the portal
+ * has opened at all, the peak has to sit where the portal fills the canvas, and
+ * the whole curve has to stay inside 0..1 so intensity means what it says.
+ */
+static void check_glow_envelope(void)
+{
+	static const float opens[] = {0.02f, 0.22f, 0.5f, 0.9f};
+	size_t oi;
+	int i;
+
+	for (oi = 0; oi < sizeof(opens) / sizeof(*opens); oi++) {
+		float open_end = opens[oi];
+		float peak = glow_for(open_end, open_end);
+
+		check(glow_for(0.0f, open_end) == 0.0f, "vortex lit at progress 0: open %g got %g", (double)open_end,
+		      (double)glow_for(0.0f, open_end));
+
+		for (i = 0; i <= 200; i++) {
+			float progress = (float)i / 200.0f;
+			float g = glow_for(progress, open_end);
+
+			check(g >= 0.0f && g <= 1.0f + 1e-6f, "glow left 0..1: open %g progress %g got %g",
+			      (double)open_end, (double)progress, (double)g);
+			check(g <= peak + 1e-6f,
+			      "glow peaks away from the open: open %g progress %g got %g "
+			      "over %g",
+			      (double)open_end, (double)progress, (double)g, (double)peak);
+		}
+	}
+}
+
 int main(void)
 {
 	check_start_is_clean();
@@ -443,6 +594,9 @@ int main(void)
 	check_noise_wraps();
 	check_phase_schedule();
 	check_reach_covers_canvas();
+	check_iris_bounds();
+	check_reveal_bounds();
+	check_glow_envelope();
 
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;
