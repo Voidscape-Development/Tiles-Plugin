@@ -77,6 +77,9 @@ uniform float swirl_pull;  /* scene zoom that goes with it; 1 is no zoom */
 uniform float4 color_bright; /* hot core colour */
 uniform float4 color_deep;   /* body colour of the arms */
 
+uniform float core_level; /* energy at which the core colour starts to take over */
+uniform float core_width; /* energy range it takes to finish taking over */
+
 sampler_state textureSampler {
 	Filter   = Linear;
 	AddressU = Clamp;
@@ -294,9 +297,11 @@ float3 vortex_colour(float2 p, float r, float ang, float rim)
 	e += rim * intensity * iris_k;
 
 	/* dim energy is deep purple body, hot energy blows out towards the core
-	 * colour - one ramp doing the work of a bloom pass */
+	 * colour - one ramp doing the work of a bloom pass. core_level is where
+	 * that starts and core_width is how long it takes, so the pair set how
+	 * far the core floods the arms when the vortex flashes. */
 	col = color_deep.rgb * e;
-	return lerp(col, color_bright.rgb, saturate((e - 1.1) / 0.9));
+	return lerp(col, color_bright.rgb, saturate((e - core_level) / max(core_width, 0.0001)));
 }
 
 /* ------------------------------------------------------------------ */

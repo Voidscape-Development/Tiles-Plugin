@@ -49,6 +49,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_ROUGHNESS    "roughness"
 #define S_INTENSITY    "intensity"
 #define S_COLOR_CORE   "color_core"
+#define S_CORE_BLEED   "core_bleed"
+#define S_CORE_BLEND   "core_blend"
 #define S_COLOR_BODY   "color_body"
 #define S_OPEN_END     "open_end"
 #define S_REVEAL_START "reveal_start"
@@ -64,6 +66,21 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 /* The portal has to finish opening before the reveal starts, or the scenes
  * would be swapped while a corner of the outgoing one was still showing. */
 #define VORTEX_PHASE_GAP 0.05f
+
+/*
+ * Core Bleed and Core Blend are geometric about the values the look was
+ * originally tuned at, so both sliders reproduce it exactly at 50% and either
+ * direction has the same amount of travel on a ratio scale, which is how these
+ * read on screen.
+ *
+ * The width is a fraction of the level rather than an absolute range: it is the
+ * softness of the body-to-core edge, and an edge that stayed the same width in
+ * energy while the level moved would harden as the core spread.
+ */
+#define VORTEX_CORE_LEVEL       1.1f
+#define VORTEX_CORE_WIDTH       0.9f
+#define VORTEX_CORE_LEVEL_RANGE 3.6f
+#define VORTEX_CORE_WIDTH_RANGE 4.0f
 
 struct vortex_info {
 	obs_source_t *source;
@@ -94,6 +111,8 @@ struct vortex_info {
 	gs_eparam_t *ep_swirl_pull;
 	gs_eparam_t *ep_color_bright;
 	gs_eparam_t *ep_color_deep;
+	gs_eparam_t *ep_core_level;
+	gs_eparam_t *ep_core_width;
 
 	float origin_x; /* 0..1 of canvas width */
 	float origin_y; /* 0..1 of canvas height */
@@ -109,6 +128,9 @@ struct vortex_info {
 	float smoke_soft;
 	float warp;      /* radians, 0 when the swirl is off */
 	float warp_pull; /* zoom that travels with the swirl */
+
+	float core_level;
+	float core_width;
 
 	struct vec4 color_bright;
 	struct vec4 color_bright_srgb;
@@ -135,6 +157,8 @@ static void vortex_update(void *data, obs_data_t *settings)
 {
 	struct vortex_info *vortex = data;
 	uint32_t color;
+	float bleed;
+	float blend;
 
 	vortex->origin_x = (float)obs_data_get_double(settings, S_ORIGIN_X) / 100.0f;
 	vortex->origin_y = (float)obs_data_get_double(settings, S_ORIGIN_Y) / 100.0f;
@@ -171,6 +195,16 @@ static void vortex_update(void *data, obs_data_t *settings)
 	color = (uint32_t)obs_data_get_int(settings, S_COLOR_BODY) | 0xFF000000;
 	vec4_from_rgba(&vortex->color_deep, color);
 	vec4_from_rgba_srgb(&vortex->color_deep_srgb, color);
+
+	bleed = clampf((float)obs_data_get_double(settings, S_CORE_BLEED) / 100.0f, 0.0f, 1.0f);
+	blend = clampf((float)obs_data_get_double(settings, S_CORE_BLEND) / 100.0f, 0.0f, 1.0f);
+
+	/* More bleed is a lower threshold: the core colour starts taking over
+	 * sooner, so it reaches further down the arms. */
+	vortex->core_level = VORTEX_CORE_LEVEL * powf(VORTEX_CORE_LEVEL_RANGE, 1.0f - 2.0f * bleed);
+	vortex->core_width = vortex->core_level * (VORTEX_CORE_WIDTH / VORTEX_CORE_LEVEL) *
+			     powf(VORTEX_CORE_WIDTH_RANGE, 2.0f * blend - 1.0f);
+	vortex->core_width = fmaxf(vortex->core_width, 0.0001f);
 
 	vortex->arms = clampf(vortex->arms, 1.0f, 16.0f);
 	vortex->open_end = clampf(vortex->open_end, 0.02f, 1.0f - 2.0f * VORTEX_PHASE_GAP);
@@ -230,6 +264,8 @@ static void *vortex_create(obs_data_t *settings, obs_source_t *source)
 	vortex->ep_swirl_pull = gs_effect_get_param_by_name(effect, "swirl_pull");
 	vortex->ep_color_bright = gs_effect_get_param_by_name(effect, "color_bright");
 	vortex->ep_color_deep = gs_effect_get_param_by_name(effect, "color_deep");
+	vortex->ep_core_level = gs_effect_get_param_by_name(effect, "core_level");
+	vortex->ep_core_width = gs_effect_get_param_by_name(effect, "core_width");
 
 	/* Applied directly for the same reason the tiling transition does it: the
 	 * source's data pointer is only assigned once create returns, so an update
@@ -289,6 +325,15 @@ static obs_properties_t *vortex_properties(void *data)
 	obs_property_float_set_suffix(p, " %");
 
 	obs_properties_add_color(props, S_COLOR_CORE, T_("Vortex.ColorCore"));
+
+	p = obs_properties_add_float_slider(props, S_CORE_BLEED, T_("Vortex.CoreBleed"), 0.0, 100.0, 1.0);
+	obs_property_float_set_suffix(p, " %");
+	obs_property_set_long_description(p, T_("Vortex.CoreBleed.Description"));
+
+	p = obs_properties_add_float_slider(props, S_CORE_BLEND, T_("Vortex.CoreBlend"), 0.0, 100.0, 1.0);
+	obs_property_float_set_suffix(p, " %");
+	obs_property_set_long_description(p, T_("Vortex.CoreBlend.Description"));
+
 	obs_properties_add_color(props, S_COLOR_BODY, T_("Vortex.ColorBody"));
 
 	p = obs_properties_add_float_slider(props, S_ORIGIN_X, T_("Vortex.OriginX"), -50.0, 150.0, 0.5);
@@ -333,6 +378,10 @@ static void vortex_defaults(obs_data_t *settings)
 	/* obs colours are 0xAABBGGRR: #E8DCFF core, #7A3FD0 body */
 	obs_data_set_default_int(settings, S_COLOR_CORE, 0xFFFFDCE8);
 	obs_data_set_default_int(settings, S_COLOR_BODY, 0xFFD03F7A);
+
+	/* 50% on both is the ramp the look was tuned with */
+	obs_data_set_default_double(settings, S_CORE_BLEED, 50.0);
+	obs_data_set_default_double(settings, S_CORE_BLEND, 50.0);
 
 	obs_data_set_default_double(settings, S_OPEN_END, 22.0);
 	obs_data_set_default_double(settings, S_REVEAL_START, 62.0);
@@ -488,6 +537,8 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(vortex->ep_intensity, vortex->intensity);
 	gs_effect_set_float(vortex->ep_smoke_scale, vortex->smoke_scale);
 	gs_effect_set_float(vortex->ep_smoke_soft, vortex->smoke_soft);
+	gs_effect_set_float(vortex->ep_core_level, vortex->core_level);
+	gs_effect_set_float(vortex->ep_core_width, vortex->core_width);
 	gs_effect_set_float(vortex->ep_swirl_angle, swirl_angle);
 	gs_effect_set_float(vortex->ep_swirl_pull, swirl_pull);
 

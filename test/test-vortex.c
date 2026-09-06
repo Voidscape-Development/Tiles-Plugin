@@ -35,6 +35,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  *      leaves the band the radius test assumes, and the reveal really is
  *      finished below its low bound and untouched above its high one, so the
  *      pixels those tests throw away had nothing to contribute
+ *   6. the core ramp still lands on the values the look was tuned at when both
+ *      of its sliders are left at the default
  */
 
 #include <math.h>
@@ -46,6 +48,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define TAU 6.2831853f
 #define FIBRES 96.0f
 #define PHASE_GAP 0.05f
+
+/* mirrors of the core ramp constants in src/vortex-transition.c */
+#define CORE_LEVEL 1.1f
+#define CORE_WIDTH 0.9f
+#define CORE_LEVEL_RANGE 3.6f
+#define CORE_WIDTH_RANGE 4.0f
 
 static int failures = 0;
 static int checks = 0;
@@ -207,6 +215,19 @@ static float reveal_amount(float px, float py, float r, float k, float reach, fl
 /* ------------------------------------------------------------------ */
 /* mirror of vortex-transition.c                                      */
 /* ------------------------------------------------------------------ */
+
+/* Core Bleed and Core Blend, geometric about the values the look was tuned at */
+static float core_level_for(float bleed)
+{
+	return CORE_LEVEL * powf(CORE_LEVEL_RANGE, 1.0f - 2.0f * bleed);
+}
+
+static float core_width_for(float bleed, float blend)
+{
+	float width = core_level_for(bleed) * (CORE_WIDTH / CORE_LEVEL) * powf(CORE_WIDTH_RANGE, 2.0f * blend - 1.0f);
+
+	return fmaxf(width, 0.0001f);
+}
 
 /* the light envelope, which the host now evaluates once a frame */
 static float glow_for(float progress, float open_end)
@@ -586,6 +607,42 @@ static void check_glow_envelope(void)
 	}
 }
 
+/*
+ * 9. The core ramp. Both sliders are geometric about the values the effect was
+ * originally tuned at, so the middle of each has to reproduce them exactly or
+ * every existing scene collection would come back looking different. More bleed
+ * has to mean a lower threshold, and the width can never reach zero, which the
+ * shader divides by.
+ */
+static void check_core_ramp(void)
+{
+	float previous = 1e30f;
+	int i, j;
+
+	check(fabsf(core_level_for(0.5f) - CORE_LEVEL) < 1e-5f, "core level default moved: got %g want %g",
+	      (double)core_level_for(0.5f), (double)CORE_LEVEL);
+	check(fabsf(core_width_for(0.5f, 0.5f) - CORE_WIDTH) < 1e-5f, "core width default moved: got %g want %g",
+	      (double)core_width_for(0.5f, 0.5f), (double)CORE_WIDTH);
+
+	for (i = 0; i <= 100; i++) {
+		float bleed = (float)i / 100.0f;
+		float level = core_level_for(bleed);
+
+		check(level > 0.0f, "core level not positive: bleed %g got %g", (double)bleed, (double)level);
+		check(level < previous, "core level not falling with bleed: bleed %g got %g after %g", (double)bleed,
+		      (double)level, (double)previous);
+		previous = level;
+
+		for (j = 0; j <= 10; j++) {
+			float blend = (float)j / 10.0f;
+			float width = core_width_for(bleed, blend);
+
+			check(width >= 0.0001f, "core width collapsed: bleed %g blend %g got %g", (double)bleed,
+			      (double)blend, (double)width);
+		}
+	}
+}
+
 int main(void)
 {
 	check_start_is_clean();
@@ -597,6 +654,7 @@ int main(void)
 	check_iris_bounds();
 	check_reveal_bounds();
 	check_glow_envelope();
+	check_core_ramp();
 
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;

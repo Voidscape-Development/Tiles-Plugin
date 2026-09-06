@@ -121,6 +121,7 @@ coordinate system rather than being warped into place afterwards.
 | **Edge Roughness** | How far the opening portal's rim is torn up. 0 gives a clean circle. The tear scales with the portal, so it stays the same fraction of the rim the whole way out. |
 | **Intensity** | Overall brightness of the generated light. |
 | **Core Colour** / **Vortex Colour** | Hot centres blow out towards the core colour; the body of the arms sits at the vortex colour. |
+| **Core Bleed** / **Core Blend** | How far the core colour reaches down into the arms when the vortex flashes, and how abruptly it takes over. 50% on both is the original look; turn the bleed up for a wide white-hot flash, down to keep the core colour to the brightest points. |
 | **Centre X/Y** | Where the portal opens. Can be pushed outside the frame (−50% to 150%); the portal is always sized to the furthest corner from wherever it sits, so an offset centre never leaves a corner of the outgoing scene showing when the scenes swap. |
 | **Portal Open** / **Reveal Start** | The phase split, as a share of the transition. Reveal Start is held above Portal Open so the hold is never empty. |
 | **Smoke Scale** / **Smoke Softness** | Size and edge width of the tendrils the incoming scene comes back through. |
