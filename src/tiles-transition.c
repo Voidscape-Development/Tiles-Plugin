@@ -63,6 +63,11 @@ enum tiles_shape {
 	TILES_SHAPE_HEXAGON = 2,
 	TILES_SHAPE_TRIANGLE = 3,
 	TILES_SHAPE_DIAMOND = 4,
+	TILES_SHAPE_BRICK = 5,
+	TILES_SHAPE_OCTAGON = 6,
+	TILES_SHAPE_CAIRO = 7,
+	TILES_SHAPE_MOSAIC = 8,
+	TILES_SHAPE_SHATTER = 9,
 };
 
 enum tiles_direction {
@@ -309,6 +314,11 @@ static obs_properties_t *tiles_properties(void *data)
 	obs_property_list_add_int(p, T_("Tiles.Shape.Hexagon"), TILES_SHAPE_HEXAGON);
 	obs_property_list_add_int(p, T_("Tiles.Shape.Triangle"), TILES_SHAPE_TRIANGLE);
 	obs_property_list_add_int(p, T_("Tiles.Shape.Diamond"), TILES_SHAPE_DIAMOND);
+	obs_property_list_add_int(p, T_("Tiles.Shape.Brick"), TILES_SHAPE_BRICK);
+	obs_property_list_add_int(p, T_("Tiles.Shape.Octagon"), TILES_SHAPE_OCTAGON);
+	obs_property_list_add_int(p, T_("Tiles.Shape.Cairo"), TILES_SHAPE_CAIRO);
+	obs_property_list_add_int(p, T_("Tiles.Shape.Mosaic"), TILES_SHAPE_MOSAIC);
+	obs_property_list_add_int(p, T_("Tiles.Shape.Shatter"), TILES_SHAPE_SHATTER);
 
 	p = obs_properties_add_int_slider(props, S_TILE_SIZE, T_("Tiles.TileSize"), 8, 1024, 1);
 	obs_property_int_set_suffix(p, " px");
@@ -396,10 +406,20 @@ static inline float tiles_circumradius(const struct tiles_info *tiles)
 {
 	switch (tiles->shape) {
 	case TILES_SHAPE_SQUARE:
+	case TILES_SHAPE_MOSAIC: /* the largest cell is a whole square */
 		return tiles->tile_px * 0.7071068f;
 	case TILES_SHAPE_DIAMOND:
 		/* the long diagonal, two triangle heights across */
 		return tiles->tile_px * 0.8660254f;
+	case TILES_SHAPE_BRICK:
+		return tiles->tile_px * 0.5590170f;
+	case TILES_SHAPE_OCTAGON:
+		return tiles->tile_px * 0.5411961f;
+	case TILES_SHAPE_CAIRO:
+		return tiles->tile_px * 0.5176381f;
+	case TILES_SHAPE_SHATTER:
+		/* a jittered cell can reach much further than a regular one */
+		return tiles->tile_px * 1.4f;
 	default:
 		return tiles->tile_px * 0.5773503f;
 	}
@@ -461,9 +481,21 @@ static inline float tiles_edge_width(const struct tiles_info *tiles)
 		return 1.7320508f / tiles->tile_px;
 	case TILES_SHAPE_TRIANGLE:
 		return 3.4641016f / tiles->tile_px;
+	case TILES_SHAPE_DIAMOND:
+		/* its faces lean, so they are crossed faster than either axis
+		 * on its own suggests */
+		return 2.3094011f / tiles->tile_px;
+	case TILES_SHAPE_BRICK:
+		/* a brick is half as tall as it is wide, so its metric climbs
+		 * twice as fast across the long edges as it does the short */
+		return 4.0f / tiles->tile_px;
+	case TILES_SHAPE_CAIRO:
+		return 2.7320508f / tiles->tile_px;
 	default:
-		/* squares, hexagons and diamonds all gain one metric unit over
-		 * half a lattice unit at their steepest */
+		/* squares, hexagons, diamonds, octagons, mosaic and shatter
+		 * cells all gain one metric unit over half a lattice unit at
+		 * their steepest. Where a tiling mixes sizes, the shader widens
+		 * this per cell - see Cell.aa in the effect. */
 		return 2.0f / tiles->tile_px;
 	}
 }

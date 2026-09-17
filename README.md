@@ -37,16 +37,29 @@ shapes.
 
 ## Shapes
 
-`Square`, `Circle`, `Hexagon`, `Triangle` and `Diamond`.
+| Shape | What it is |
+| --- | --- |
+| **Square** | A square lattice. |
+| **Hexagon** | Pointy-top hexagons on a triangular lattice. |
+| **Triangle** | Equilateral triangles, two per lattice rhombus. |
+| **Diamond** | A triangle joined to its own mirror image along the base, so it points up and down. At the same tile size it is as wide as a triangle and √3 times taller than it is wide. |
+| **Brick** | Rectangles twice as wide as they are tall, every other row slid half a brick along. Running bond, and no aligned columns anywhere. |
+| **Octagon** | Regular octagons on a square lattice. Octagons cannot close the plane alone; what they leave at each lattice corner is a small square standing on its point, and that is a tile in its own right, so the sweep carries two tile sizes at once. |
+| **Cairo Pentagon** | The Cairo tiling: pentagons with two right angles and three of 120°, four to a turn around each four-fold point. |
+| **Mosaic** | Squares that quarter themselves, twice, on their own hash, mixing three tile sizes in one sweep. Large slabs and fine detail arrive together. |
+| **Shatter** | The Voronoi cells of a jittered lattice — irregular, organic cells that break the canvas up like glass rather than a grid. |
+| **Circle** | The one shape that cannot tile. |
 
-Squares sit on a square lattice; hexagons, triangles and diamonds on a
-triangular one; all four close up perfectly with no overlap. A diamond is a
-triangle joined to its own mirror image along the base, so it points up and
-down: at the same tile size it is as wide as a triangle and √3 times taller
-than it is wide. Circles are the exception — no arrangement of circles can tile
-a plane — so they are placed on the hexagonal lattice and grow past their own
-cell, overlapping their neighbours until the last gap closes. They reach full
-coverage at exactly the same moment the other shapes do.
+Everything but `Circle` closes up perfectly with no overlap, whatever the tile
+size, grid rotation or origin. Circles are the exception — no arrangement of
+circles can tile a plane — so they are placed on the hexagonal lattice and grow
+past their own cell, overlapping their neighbours until the last gap closes.
+They reach full coverage at exactly the same moment the other shapes do.
+
+Every tile grows by scaling about its own centre, so the area covered tracks
+the square of the scale for all of them, mixed tile sizes included: `Mosaic`
+and `Octagon` finish in step with the rest rather than leaving their small
+tiles behind.
 
 **Grid Rotation** turns the lattice itself, independently of the sweep
 direction: 30° turns flat-top hexagons into pointy-top ones, a few degrees off

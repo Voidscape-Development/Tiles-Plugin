@@ -9,8 +9,21 @@
  *   triangle  - equilateral triangles, two per lattice rhombus
  *   diamond   - a triangle joined to its mirror image along the base, so one
  *               diamond per pair of triangles, on the same lattice
+ *   brick     - squat rectangles, every other row slid half a brick along
+ *   octagon   - regular octagons on a square lattice, with the square each
+ *               lattice corner is left standing on its point as a tile too
+ *   cairo     - the Cairo pentagon, four to a turn around each four-fold point
+ *   mosaic    - squares that quarter themselves, twice, on their own hash, so
+ *               the tiling mixes three tile sizes
+ *   shatter   - the Voronoi cells of a jittered lattice of seeds
  *   circle    - circumscribed circles on the hexagonal lattice; they overshoot
  *               the cell and overlap their neighbours to close the gaps
+ *
+ * Every tile grows by scaling about its own centre, so the metric of each
+ * shape is a gauge: homogeneous, 0 at the centre and 1 on the boundary. That
+ * is what makes coverage track the square of the scale for all of them, mixed
+ * tile sizes included, and what lets a shape be anything star shaped about its
+ * centre rather than only the regular polygons that tile on their own.
  *
  * NOTE: the lattice and coverage math is mirrored in test/test-tiling.c.
  * Keep the two in sync when changing shape_metric()/resolve_tile().
@@ -39,7 +52,8 @@ uniform float variation;   /* per tile brightness jitter */
 
 uniform int easing;        /* 0 linear, 1 in-out, 2 out; shapes the launch order */
 uniform int mode;          /* 0 cover, 1 keyhole, 2 wave, 3 crop, 4 scale */
-uniform int shape;         /* 0 square, 1 circle, 2 hexagon, 3 triangle, 4 diamond */
+uniform int shape;         /* 0 square, 1 circle, 2 hexagon, 3 triangle, 4 diamond,
+			      5 brick, 6 octagon, 7 cairo, 8 mosaic, 9 shatter */
 uniform int direction;     /* 0 in-out, 1 out-in, 2 mirror-in, 3 mirror-out, 4 angle */
 
 uniform bool invert;       /* keyhole: put the outgoing scene inside the tiles */
@@ -63,6 +77,23 @@ VertData VSDefault(VertData v_in)
 	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
 	vert_out.uv = v_in.uv;
 	return vert_out;
+}
+
+/* ------------------------------------------------------------------ */
+/* hashes                                                             */
+/* ------------------------------------------------------------------ */
+
+float hash21(float2 p)
+{
+	float2 h = frac(p * float2(127.1, 311.7));
+	h += dot(h, h + 47.31);
+	return frac(h.x * h.y);
+}
+
+/* Two uncorrelated values from one cell, for the shatter jitter. */
+float2 hash22(float2 p)
+{
+	return float2(hash21(p), hash21(p + 19.73));
 }
 
 /* ------------------------------------------------------------------ */
@@ -95,6 +126,56 @@ float2 hex_centre(float2 q)
 	return c2;
 }
 
+/* Seed of a shatter cell, jittered inside its own cell so the seed nearest a
+ * pixel is always in the 3x3 block of cells around it. */
+float2 shatter_seed(float2 cell)
+{
+	return cell + 0.5 + (hash22(cell) - 0.5) * 0.8;
+}
+
+/*
+ * One half plane of a Voronoi cell, as a gauge: the neighbouring seed cuts the
+ * owner's tile along the bisector between them, where this reads 1. Cells that
+ * hold the owner's own seed cut nothing.
+ *
+ * Returns the gauge in x and, in y, how fast it climbs relative to a tile of
+ * the usual size: the nearer the neighbour, the nearer its cut and the steeper
+ * the climb, so a cell the seeds squeezed needs a narrower ramp than one they
+ * left roomy.
+ */
+float2 shatter_cut(float2 local, float2 owner, float2 cell)
+{
+	float2 d = shatter_seed(cell) - owner;
+	float dd = dot(d, d);
+
+	if (dd < 1e-6)
+		return float2(0.0, 0.0);
+	return float2(2.0 * dot(local, d) / dd, 1.0 / sqrt(dd));
+}
+
+/*
+ * Gauge of the Cairo pentagon about its own seed. Every one of its five edges
+ * sits the same distance from the seed - the tiling is the Voronoi diagram of
+ * the snub square tiling, and all of that tiling's edges are one length - so
+ * the gauge is the largest of five half planes of equal weight.
+ */
+float cairo_gauge(float2 x)
+{
+	float m = x.y;
+
+	m = max(m, x.x * 0.8660254 + x.y * 0.5);
+	m = max(m, x.x * 0.5 - x.y * 0.8660254);
+	m = max(m, -x.x * 0.5 - x.y * 0.8660254);
+	m = max(m, -x.x * 0.8660254 + x.y * 0.5);
+	return m * 2.7320508;
+}
+
+float octagon_metric(float2 local)
+{
+	float2 p = abs(local);
+	return max(max(p.x, p.y) * 2.0, (p.x + p.y) * 1.4142136);
+}
+
 /*
  * Distance to the tile edge, normalised: 0 at the tile centre, 1 on the tile
  * boundary. A tile scaled by s about its centre covers the pixel when the
@@ -109,19 +190,36 @@ float shape_metric(float2 local)
 	if (shape == 4)
 		/* half width 0.5 across, half height sqrt(3)/2 down */
 		return abs(local.x) * 2.0 + abs(local.y) * 1.1547005;
+	if (shape == 5)
+		/* twice as wide as it is tall */
+		return max(abs(local.x) * 2.0, abs(local.y) * 4.0);
 
 	float2 p = abs(local);
 	return max(p.x, p.x * 0.5 + p.y * 0.8660254) * 2.0;
 }
 
+/* Keeps whichever of two shatter seeds is nearer the pixel. */
+float2 shatter_nearer(float2 q, float2 best, float2 cell)
+{
+	float2 s = shatter_seed(cell);
+
+	if (dot(q - s, q - s) < dot(q - best, q - best))
+		return s;
+	return best;
+}
+
 struct Cell {
 	float2 centre; /* lattice space */
 	float metric;
+	float aa; /* coverage ramp of this cell, relative to the shape's own */
 };
 
 Cell resolve_tile(float2 q)
 {
 	Cell cell;
+
+	/* tilings whose cells all match take the shape's ramp as it comes */
+	cell.aa = 1.0;
 
 	if (shape == 0) {
 		cell.centre = floor(q) + 0.5;
@@ -159,6 +257,146 @@ Cell resolve_tile(float2 q)
 
 		cell.centre = float2((c.x + c.y) * 0.25, (c.x - c.y) * 0.4330127);
 		cell.metric = shape_metric(q - cell.centre);
+	} else if (shape == 5) {
+		/* running bond: every other row of bricks slides half a brick */
+		float row = floor(q.y * 2.0);
+		float off = 0.5 * (row - 2.0 * floor(row * 0.5));
+		float col = floor(q.x - off);
+
+		cell.centre = float2(col + 0.5 + off, (row + 0.5) * 0.5);
+		cell.metric = shape_metric(q - cell.centre);
+	} else if (shape == 6) {
+		/*
+		 * Regular octagons on a square lattice. They cannot close the
+		 * plane on their own; what they leave at each lattice corner is
+		 * a square standing on its point, and that is a tile too.
+		 */
+		float2 oc = floor(q) + 0.5;
+		float mo = octagon_metric(q - oc);
+
+		if (mo <= 1.0) {
+			cell.centre = oc;
+			cell.metric = mo;
+		} else {
+			float2 sc = floor(q + 0.5);
+			float2 d = abs(q - sc);
+
+			cell.centre = sc;
+			cell.metric = (d.x + d.y) * 3.4142136;
+			/* the corner squares are the smaller tile, so their
+			 * metric climbs faster and their ramp has to widen */
+			cell.aa = 2.4142136;
+		}
+	} else if (shape == 7) {
+		/*
+		 * Cairo: one pentagon per edge of a square lattice of four-fold
+		 * vertices, pinwheeled around each vertex. On an even cell the
+		 * two pentagons standing on the horizontal edges fill most of
+		 * it and the two on the vertical edges poke their apexes in; an
+		 * odd cell is the same pattern turned a quarter turn.
+		 */
+		float2 ic = floor(q);
+		float2 f = q - ic;
+		float2 g = f;
+		float odd = 0.0;
+		float2 s0 = float2(0.5, 0.1339746);  /* body up, apex down */
+		float2 s1 = float2(0.5, 0.8660254);  /* body down, apex up */
+		float2 s2 = float2(-0.1339746, 0.5); /* body left, apex right */
+		float2 s3 = float2(1.1339746, 0.5);  /* body right, apex left */
+		float2 d2;
+		float2 d3;
+		float2 s = s0;
+		float m1;
+		float m2;
+		float m3;
+		float m;
+
+		if (frac((ic.x + ic.y) * 0.5) > 0.25) {
+			odd = 1.0;
+			g = float2(f.y, 1.0 - f.x);
+		}
+
+		d2 = g - s2;
+		d3 = g - s3;
+		m = cairo_gauge(g - s0);
+		m1 = cairo_gauge(s1 - g);
+		m2 = cairo_gauge(float2(d2.y, -d2.x));
+		m3 = cairo_gauge(float2(-d3.y, d3.x));
+
+		/* the pixel's own pentagon is the only one that reads under 1 */
+		if (m1 < m) {
+			m = m1;
+			s = s1;
+		}
+		if (m2 < m) {
+			m = m2;
+			s = s2;
+		}
+		if (m3 < m) {
+			m = m3;
+			s = s3;
+		}
+
+		if (odd > 0.5)
+			cell.centre = ic + float2(1.0 - s.y, s.x);
+		else
+			cell.centre = ic + s;
+		cell.metric = m;
+	} else if (shape == 8) {
+		/* squares that quarter themselves, twice, on their own hash */
+		float2 o = floor(q);
+		float sz = 1.0;
+
+		if (hash21(o + sz * 0.5) < 0.5) {
+			sz *= 0.5;
+			o += clamp(floor((q - o) / sz), 0.0, 1.0) * sz;
+		}
+		if (hash21(o + sz * 0.5) < 0.5) {
+			sz *= 0.5;
+			o += clamp(floor((q - o) / sz), 0.0, 1.0) * sz;
+		}
+
+		cell.centre = o + sz * 0.5;
+		cell.metric = max(abs(q.x - cell.centre.x), abs(q.y - cell.centre.y)) * 2.0 / sz;
+		/* a quartered cell is half the size, so its metric climbs twice
+		 * as fast over the same pixel and its ramp has to widen to match */
+		cell.aa = 1.0 / sz;
+	} else if (shape == 9) {
+		/* shatter: the Voronoi cells of a jittered lattice of seeds */
+		float2 b = floor(q);
+		float2 o = shatter_seed(b);
+		float2 oc;
+		float2 local;
+		float2 m;
+
+		o = shatter_nearer(q, o, b + float2(-1.0, -1.0));
+		o = shatter_nearer(q, o, b + float2(0.0, -1.0));
+		o = shatter_nearer(q, o, b + float2(1.0, -1.0));
+		o = shatter_nearer(q, o, b + float2(-1.0, 0.0));
+		o = shatter_nearer(q, o, b + float2(1.0, 0.0));
+		o = shatter_nearer(q, o, b + float2(-1.0, 1.0));
+		o = shatter_nearer(q, o, b + float2(0.0, 1.0));
+		o = shatter_nearer(q, o, b + float2(1.0, 1.0));
+
+		/* the tile is whatever the seeds around the owner leave it */
+		oc = floor(o);
+		local = q - o;
+		/* componentwise: the deepest cut is the metric, and the closest
+		 * neighbour of the lot is the tile's steepest edge, which is
+		 * the one its ramp has to be wide enough for */
+		m = float2(0.0, 0.0);
+		m = max(m, shatter_cut(local, o, oc + float2(-1.0, -1.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(0.0, -1.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(1.0, -1.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(-1.0, 0.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(1.0, 0.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(-1.0, 1.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(0.0, 1.0)));
+		m = max(m, shatter_cut(local, o, oc + float2(1.0, 1.0)));
+
+		cell.centre = o;
+		cell.metric = m.x;
+		cell.aa = m.y;
 	} else {
 		cell.centre = hex_centre(q);
 		cell.metric = shape_metric(q - cell.centre);
@@ -170,13 +408,6 @@ Cell resolve_tile(float2 q)
 /* ------------------------------------------------------------------ */
 /* sweep order                                                        */
 /* ------------------------------------------------------------------ */
-
-float hash21(float2 p)
-{
-	float2 h = frac(p * float2(127.1, 311.7));
-	h += dot(h, h + 47.31);
-	return frac(h.x * h.y);
-}
 
 /*
  * Where this tile sits in the sweep, 0 (first) to 1 (last). The ranges are
@@ -205,14 +436,16 @@ float sweep_order(float2 centre_px)
 }
 
 /* Antialiased coverage of a tile scaled by s. Exact at both extremes so a
- * finished sweep leaves no seams and a spent tile leaves no speck. */
-float tile_coverage(float metric, float s)
+ * finished sweep leaves no seams and a spent tile leaves no speck. The ramp is
+ * measured in metric units, so a tiling whose cells differ in size scales it
+ * per cell to keep the edge about a pixel wide whatever the tile. */
+float tile_coverage(float metric, float s, float aa)
 {
 	if (s <= 0.0)
 		return 0.0;
 	if (s >= 1.0)
 		return 1.0;
-	return saturate((s - metric) / edge + 1.0);
+	return saturate((s - metric) / (edge * aa) + 1.0);
 }
 
 /*
@@ -248,6 +481,7 @@ float ease_order(float d)
 struct Tile {
 	float2 centre_px;
 	float metric;
+	float aa;
 	float cov;
 	float s;    /* scale of the shape, 0..1 */
 	float d;    /* sweep order */
@@ -255,12 +489,13 @@ struct Tile {
 	float on_b; /* 1 once this tile hides the switch to the incoming scene */
 };
 
-Tile eval_tile(float2 centre_lat, float metric)
+Tile eval_tile(float2 centre_lat, float metric, float aa)
 {
 	Tile tile;
 
 	tile.centre_px = from_lattice(centre_lat);
 	tile.metric = metric;
+	tile.aa = aa;
 	tile.h = hash21(centre_lat);
 	tile.d = lerp(sweep_order(tile.centre_px), tile.h, randomness);
 	tile.on_b = 0.0;
@@ -297,7 +532,7 @@ Tile eval_tile(float2 centre_lat, float metric)
 		tile.s = (mode == 1 && !invert) ? p : 1.0 - p;
 	}
 
-	tile.cov = tile_coverage(metric, tile.s);
+	tile.cov = tile_coverage(metric, tile.s, aa);
 	return tile;
 }
 
@@ -305,39 +540,39 @@ Tile eval_tile(float2 centre_lat, float metric)
 Tile best_tile(float2 q)
 {
 	Cell cell = resolve_tile(q);
-	Tile best = eval_tile(cell.centre, cell.metric);
+	Tile best = eval_tile(cell.centre, cell.metric, cell.aa);
 
 	if (shape == 1) {
 		float2 c;
 		Tile n;
 
 		c = cell.centre + float2(1.0, 0.0);
-		n = eval_tile(c, shape_metric(q - c));
+		n = eval_tile(c, shape_metric(q - c), 1.0);
 		if (n.cov > best.cov)
 			best = n;
 
 		c = cell.centre + float2(-1.0, 0.0);
-		n = eval_tile(c, shape_metric(q - c));
+		n = eval_tile(c, shape_metric(q - c), 1.0);
 		if (n.cov > best.cov)
 			best = n;
 
 		c = cell.centre + float2(0.5, 0.8660254);
-		n = eval_tile(c, shape_metric(q - c));
+		n = eval_tile(c, shape_metric(q - c), 1.0);
 		if (n.cov > best.cov)
 			best = n;
 
 		c = cell.centre + float2(-0.5, 0.8660254);
-		n = eval_tile(c, shape_metric(q - c));
+		n = eval_tile(c, shape_metric(q - c), 1.0);
 		if (n.cov > best.cov)
 			best = n;
 
 		c = cell.centre + float2(0.5, -0.8660254);
-		n = eval_tile(c, shape_metric(q - c));
+		n = eval_tile(c, shape_metric(q - c), 1.0);
 		if (n.cov > best.cov)
 			best = n;
 
 		c = cell.centre + float2(-0.5, -0.8660254);
-		n = eval_tile(c, shape_metric(q - c));
+		n = eval_tile(c, shape_metric(q - c), 1.0);
 		if (n.cov > best.cov)
 			best = n;
 	}
@@ -385,7 +620,7 @@ float4 PSTiles(VertData v_in) : TARGET
 			uv_b = centre_uv + (uv - centre_uv) / max(grow, 0.0001);
 
 		base = lerp(tile_colour(tile), b_tex.Sample(textureSampler, uv_b),
-			    tile_coverage(tile.metric, grow));
+			    tile_coverage(tile.metric, grow, tile.aa));
 	}
 
 	/*

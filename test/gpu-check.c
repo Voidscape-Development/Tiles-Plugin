@@ -48,7 +48,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define CW 640
 #define CH 360
 
-#define SHAPE_COUNT 5
+#define SHAPE_COUNT 10
 
 static uint32_t px_a[CW * CH], px_b[CW * CH];
 static uint8_t out[CH][CW][4];
@@ -88,19 +88,37 @@ static gs_stagesurf_t *stage;
 
 static float circumradius(int shape, float tile_px)
 {
-	if (shape == 0)
+	switch (shape) {
+	case 0: /* square */
+	case 8: /* mosaic, whose largest cell is a whole square */
 		return tile_px * 0.7071068f;
-	if (shape == 4)
+	case 4: /* diamond */
 		return tile_px * 0.8660254f;
-	return tile_px * 0.5773503f;
+	case 5: /* brick */
+		return tile_px * 0.5590170f;
+	case 6: /* octagon */
+		return tile_px * 0.5411961f;
+	case 7: /* cairo */
+		return tile_px * 0.5176381f;
+	case 9: /* shatter */
+		return tile_px * 1.4f;
+	default:
+		return tile_px * 0.5773503f;
+	}
 }
 
 static float edge_width(int shape, float tile_px)
 {
-	if (shape == 1)
+	if (shape == 1) /* circle */
 		return 1.7320508f / tile_px;
-	if (shape == 3)
+	if (shape == 3) /* triangle */
 		return 3.4641016f / tile_px;
+	if (shape == 4) /* diamond */
+		return 2.3094011f / tile_px;
+	if (shape == 5) /* brick */
+		return 4.0f / tile_px;
+	if (shape == 7) /* cairo */
+		return 2.7320508f / tile_px;
 	return 2.0f / tile_px;
 }
 
@@ -201,7 +219,8 @@ int main(int argc, char **argv)
 	const char *effect_path;
 	const uint8_t *pa = (const uint8_t *)px_a, *pb = (const uint8_t *)px_b;
 	const char *mode_name[] = {"cover", "keyhole", "wave", "crop shrink", "scale shrink"};
-	const char *shape_name[] = {"square", "circle", "hexagon", "triangle", "diamond"};
+	const char *shape_name[] = {"square", "circle",  "hexagon", "triangle", "diamond",
+				    "brick",  "octagon", "cairo",   "mosaic",   "shatter"};
 	const char *dir_name[] = {"inside out", "outside in", "mirrored in", "mirrored out", "directional"};
 	const float times[] = {0.0f, 0.2f, 0.4f, 0.5f, 0.6f, 0.8f, 1.0f};
 	char *effect_errors = NULL;
