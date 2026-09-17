@@ -40,6 +40,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define SHAPE_CIRCLE 1
 #define SHAPE_HEXAGON 2
 #define SHAPE_TRIANGLE 3
+#define SHAPE_DIAMOND 4
+#define SHAPE_COUNT 5
 
 #define DIR_INSIDE_OUT 0
 #define DIR_OUTSIDE_IN 1
@@ -140,6 +142,8 @@ static float shape_metric(int shape, struct vec2 local)
 		return (ax > ay ? ax : ay) * 2.0f;
 	if (shape == SHAPE_CIRCLE)
 		return sqrtf(local.x * local.x + local.y * local.y) * 1.7320508f;
+	if (shape == SHAPE_DIAMOND)
+		return ax * 2.0f + ay * 1.1547005f;
 
 	return (ax > ax * 0.5f + ay * 0.8660254f ? ax : ax * 0.5f + ay * 0.8660254f) * 2.0f;
 }
@@ -182,6 +186,17 @@ static struct cell resolve_tile(int shape, struct vec2 q)
 		cell.metric = 1.0f - 3.0f * mb;
 		cell.centre.x = cx + 0.5f * cy;
 		cell.centre.y = 0.8660254f * cy;
+	} else if (shape == SHAPE_DIAMOND) {
+		float g = q.x * 2.0f + q.y * 1.1547005f;
+		float h = q.x * 2.0f - q.y * 1.1547005f;
+		float gc = (floorf(g * 0.5f) + 0.5f) * 2.0f;
+		float hc = (floorf(h * 0.5f) + 0.5f) * 2.0f;
+
+		cell.centre.x = (gc + hc) * 0.25f;
+		cell.centre.y = (gc - hc) * 0.4330127f;
+		local.x = q.x - cell.centre.x;
+		local.y = q.y - cell.centre.y;
+		cell.metric = shape_metric(shape, local);
 	} else {
 		cell.centre = hex_centre(q);
 		local.x = q.x - cell.centre.x;
@@ -309,6 +324,8 @@ static float circumradius(int shape, float tile_px)
 {
 	if (shape == SHAPE_SQUARE)
 		return tile_px * 0.7071068f;
+	if (shape == SHAPE_DIAMOND)
+		return tile_px * 0.8660254f;
 	return tile_px * 0.5773503f;
 }
 
@@ -323,8 +340,10 @@ static const char *shape_name(int shape)
 		return "circle";
 	case SHAPE_HEXAGON:
 		return "hexagon";
-	default:
+	case SHAPE_TRIANGLE:
 		return "triangle";
+	default:
+		return "diamond";
 	}
 }
 
@@ -403,7 +422,7 @@ static void test_full_coverage(void)
 	const float origins[][2] = {{960.0f, 540.0f}, {0.0f, 0.0f}, {1920.0f, 1080.0f}, {-480.0f, 1600.0f}};
 	int shape, i, j, k;
 
-	for (shape = 0; shape < 4; shape++) {
+	for (shape = 0; shape < SHAPE_COUNT; shape++) {
 		for (i = 0; i < 4; i++) {
 			for (j = 0; j < 5; j++) {
 				for (k = 0; k < 4; k++) {
@@ -445,7 +464,7 @@ static void test_growth_profile(void)
 	const float scales[] = {0.0f, 0.25f, 0.5f, 0.75f, 0.999f};
 	int shape, i;
 
-	for (shape = 0; shape < 4; shape++) {
+	for (shape = 0; shape < SHAPE_COUNT; shape++) {
 		struct grid g;
 		double previous = -1.0;
 
@@ -486,20 +505,31 @@ static void test_growth_profile(void)
 }
 
 /* Claim: the shapes tile, they do not stack. A pixel belongs to exactly one
- * tile for the three gap-free shapes. */
+ * tile for the gap-free shapes. */
 static void test_tiles_do_not_overlap(void)
 {
-	const int shapes[] = {SHAPE_SQUARE, SHAPE_HEXAGON};
 	const float square_x[4] = {1.0f, -1.0f, 0.0f, 0.0f};
 	const float square_y[4] = {0.0f, 0.0f, 1.0f, -1.0f};
+	/* diamond centres sit on the same triangular lattice the hexagons do,
+	 * so the two share their neighbour offsets */
 	const float hex_x[6] = {1.0f, -1.0f, 0.5f, -0.5f, 0.5f, -0.5f};
 	const float hex_y[6] = {0.0f, 0.0f, 0.8660254f, 0.8660254f, -0.8660254f, -0.8660254f};
+	const struct {
+		int shape;
+		int neighbours;
+		const float *ox;
+		const float *oy;
+	} cases[] = {
+		{SHAPE_SQUARE, 4, square_x, square_y},
+		{SHAPE_HEXAGON, 6, hex_x, hex_y},
+		{SHAPE_DIAMOND, 6, hex_x, hex_y},
+	};
 	int s, i;
 
-	for (s = 0; s < 2; s++) {
+	for (s = 0; s < (int)(sizeof(cases) / sizeof(cases[0])); s++) {
 		struct grid g;
-		int shape = shapes[s];
-		int neighbours = shape == SHAPE_SQUARE ? 4 : 6;
+		int shape = cases[s].shape;
+		int neighbours = cases[s].neighbours;
 
 		g.shape = shape;
 		g.tile_px = 71.0f;
@@ -517,8 +547,8 @@ static void test_tiles_do_not_overlap(void)
 			for (n = 0; n < neighbours; n++) {
 				struct vec2 local;
 
-				local.x = q.x - (cell.centre.x + (shape == SHAPE_SQUARE ? square_x[n] : hex_x[n]));
-				local.y = q.y - (cell.centre.y + (shape == SHAPE_SQUARE ? square_y[n] : hex_y[n]));
+				local.x = q.x - (cell.centre.x + cases[s].ox[n]);
+				local.y = q.y - (cell.centre.y + cases[s].oy[n]);
 
 				check(shape_metric(shape, local) >= 1.0f - 1e-4f,
 				      "%s tiles overlap: pixel %.2f/%.2f sits inside two tiles at full scale",
@@ -540,7 +570,7 @@ static void test_sweep_completes(void)
 	const int easings[] = {EASE_LINEAR, EASE_IN_OUT, EASE_OUT};
 	int direction, o, a, shape, e;
 
-	for (shape = 0; shape < 4; shape++)
+	for (shape = 0; shape < SHAPE_COUNT; shape++)
 		for (direction = 0; direction < 5; direction++) {
 			for (o = 0; o < 6; o++) {
 				for (a = 0; a < 5; a++) {

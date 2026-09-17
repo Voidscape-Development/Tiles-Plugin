@@ -7,6 +7,8 @@
  *   square    - unit square lattice
  *   hexagon   - Voronoi cells of a triangular lattice (pointy-top hexagons)
  *   triangle  - equilateral triangles, two per lattice rhombus
+ *   diamond   - a triangle joined to its mirror image along the base, so one
+ *               diamond per pair of triangles, on the same lattice
  *   circle    - circumscribed circles on the hexagonal lattice; they overshoot
  *               the cell and overlap their neighbours to close the gaps
  *
@@ -37,7 +39,7 @@ uniform float variation;   /* per tile brightness jitter */
 
 uniform int easing;        /* 0 linear, 1 in-out, 2 out; shapes the launch order */
 uniform int mode;          /* 0 cover, 1 keyhole, 2 wave, 3 crop, 4 scale */
-uniform int shape;         /* 0 square, 1 circle, 2 hexagon, 3 triangle */
+uniform int shape;         /* 0 square, 1 circle, 2 hexagon, 3 triangle, 4 diamond */
 uniform int direction;     /* 0 in-out, 1 out-in, 2 mirror-in, 3 mirror-out, 4 angle */
 
 uniform bool invert;       /* keyhole: put the outgoing scene inside the tiles */
@@ -104,6 +106,9 @@ float shape_metric(float2 local)
 		return max(abs(local.x), abs(local.y)) * 2.0;
 	if (shape == 1)
 		return length(local) * 1.7320508; /* 1 / circumradius */
+	if (shape == 4)
+		/* half width 0.5 across, half height sqrt(3)/2 down */
+		return abs(local.x) * 2.0 + abs(local.y) * 1.1547005;
 
 	float2 p = abs(local);
 	return max(p.x, p.x * 0.5 + p.y * 0.8660254) * 2.0;
@@ -141,6 +146,19 @@ Cell resolve_tile(float2 q)
 		/* scaling about the centroid moves every barycentric equally */
 		cell.metric = 1.0 - 3.0 * min(bary.x, min(bary.y, bary.z));
 		cell.centre = float2(cs.x + 0.5 * cs.y, 0.8660254 * cs.y);
+	} else if (shape == 4) {
+		/*
+		 * A triangle and the one mirrored under it, taken as a single
+		 * tile. Shearing onto g = 2x + y / (sqrt(3)/2) and
+		 * h = 2x - y / (sqrt(3)/2) turns the diamonds into axis aligned
+		 * squares of side 2, so the cell is found the same cheap,
+		 * branch free way the square one is.
+		 */
+		float2 gh = float2(q.x * 2.0 + q.y * 1.1547005, q.x * 2.0 - q.y * 1.1547005);
+		float2 c = (floor(gh * 0.5) + 0.5) * 2.0;
+
+		cell.centre = float2((c.x + c.y) * 0.25, (c.x - c.y) * 0.4330127);
+		cell.metric = shape_metric(q - cell.centre);
 	} else {
 		cell.centre = hex_centre(q);
 		cell.metric = shape_metric(q - cell.centre);

@@ -37,14 +37,16 @@ shapes.
 
 ## Shapes
 
-`Square`, `Circle`, `Hexagon` and `Triangle`.
+`Square`, `Circle`, `Hexagon`, `Triangle` and `Diamond`.
 
-Squares sit on a square lattice; hexagons and triangles on a triangular one;
-all three close up perfectly with no overlap. Circles are the exception — no
-arrangement of circles can tile a plane — so they are placed on the hexagonal
-lattice and grow past their own cell, overlapping their neighbours until the
-last gap closes. They reach full coverage at exactly the same moment the other
-shapes do.
+Squares sit on a square lattice; hexagons, triangles and diamonds on a
+triangular one; all four close up perfectly with no overlap. A diamond is a
+triangle joined to its own mirror image along the base, so it points up and
+down: at the same tile size it is as wide as a triangle and √3 times taller
+than it is wide. Circles are the exception — no arrangement of circles can tile
+a plane — so they are placed on the hexagonal lattice and grow past their own
+cell, overlapping their neighbours until the last gap closes. They reach full
+coverage at exactly the same moment the other shapes do.
 
 **Grid Rotation** turns the lattice itself, independently of the sweep
 direction: 30° turns flat-top hexagons into pointy-top ones, a few degrees off

@@ -48,6 +48,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define CW 640
 #define CH 360
 
+#define SHAPE_COUNT 5
+
 static uint32_t px_a[CW * CH], px_b[CW * CH];
 static uint8_t out[CH][CW][4];
 static int failures, checks;
@@ -86,7 +88,11 @@ static gs_stagesurf_t *stage;
 
 static float circumradius(int shape, float tile_px)
 {
-	return shape == 0 ? tile_px * 0.7071068f : tile_px * 0.5773503f;
+	if (shape == 0)
+		return tile_px * 0.7071068f;
+	if (shape == 4)
+		return tile_px * 0.8660254f;
+	return tile_px * 0.5773503f;
 }
 
 static float edge_width(int shape, float tile_px)
@@ -195,7 +201,7 @@ int main(int argc, char **argv)
 	const char *effect_path;
 	const uint8_t *pa = (const uint8_t *)px_a, *pb = (const uint8_t *)px_b;
 	const char *mode_name[] = {"cover", "keyhole", "wave", "crop shrink", "scale shrink"};
-	const char *shape_name[] = {"square", "circle", "hexagon", "triangle"};
+	const char *shape_name[] = {"square", "circle", "hexagon", "triangle", "diamond"};
 	const char *dir_name[] = {"inside out", "outside in", "mirrored in", "mirrored out", "directional"};
 	const float times[] = {0.0f, 0.2f, 0.4f, 0.5f, 0.6f, 0.8f, 1.0f};
 	char *effect_errors = NULL;
@@ -239,7 +245,7 @@ int main(int argc, char **argv)
 	stage = gs_stagesurface_create(CW, CH, GS_RGBA);
 
 	for (int mode = 0; mode < 5; mode++) {
-		for (int shape = 0; shape < 4; shape++) {
+		for (int shape = 0; shape < SHAPE_COUNT; shape++) {
 			for (int direction = 0; direction < 5; direction++) {
 				char ctx[128];
 				snprintf(ctx, sizeof(ctx), "%s / %s / %s", mode_name[mode], shape_name[shape],
@@ -273,7 +279,7 @@ int main(int argc, char **argv)
 	}
 
 	/* the option toggles, and an origin pushed outside the frame */
-	for (int shape = 0; shape < 4; shape++) {
+	for (int shape = 0; shape < SHAPE_COUNT; shape++) {
 		draw(1, shape, 0, 1.0f, 0.0f, 50.0f, 50.0f, 0.0f, true, false, false);
 		check(share_of(0, 0, 255) > 0.999, "keyhole inverted / %s: t=1 incoming scene only %.4f visible",
 		      shape_name[shape], share_of(0, 0, 255));

@@ -62,6 +62,7 @@ enum tiles_shape {
 	TILES_SHAPE_CIRCLE = 1,
 	TILES_SHAPE_HEXAGON = 2,
 	TILES_SHAPE_TRIANGLE = 3,
+	TILES_SHAPE_DIAMOND = 4,
 };
 
 enum tiles_direction {
@@ -307,6 +308,7 @@ static obs_properties_t *tiles_properties(void *data)
 	obs_property_list_add_int(p, T_("Tiles.Shape.Circle"), TILES_SHAPE_CIRCLE);
 	obs_property_list_add_int(p, T_("Tiles.Shape.Hexagon"), TILES_SHAPE_HEXAGON);
 	obs_property_list_add_int(p, T_("Tiles.Shape.Triangle"), TILES_SHAPE_TRIANGLE);
+	obs_property_list_add_int(p, T_("Tiles.Shape.Diamond"), TILES_SHAPE_DIAMOND);
 
 	p = obs_properties_add_int_slider(props, S_TILE_SIZE, T_("Tiles.TileSize"), 8, 1024, 1);
 	obs_property_int_set_suffix(p, " px");
@@ -392,9 +394,15 @@ static void tiles_defaults(obs_data_t *settings)
 /* Distance from a tile centre to the furthest pixel it owns, in pixels. */
 static inline float tiles_circumradius(const struct tiles_info *tiles)
 {
-	if (tiles->shape == TILES_SHAPE_SQUARE)
+	switch (tiles->shape) {
+	case TILES_SHAPE_SQUARE:
 		return tiles->tile_px * 0.7071068f;
-	return tiles->tile_px * 0.5773503f;
+	case TILES_SHAPE_DIAMOND:
+		/* the long diagonal, two triangle heights across */
+		return tiles->tile_px * 0.8660254f;
+	default:
+		return tiles->tile_px * 0.5773503f;
+	}
 }
 
 /*
@@ -454,6 +462,8 @@ static inline float tiles_edge_width(const struct tiles_info *tiles)
 	case TILES_SHAPE_TRIANGLE:
 		return 3.4641016f / tiles->tile_px;
 	default:
+		/* squares, hexagons and diamonds all gain one metric unit over
+		 * half a lattice unit at their steepest */
 		return 2.0f / tiles->tile_px;
 	}
 }
