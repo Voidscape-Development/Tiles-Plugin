@@ -40,6 +40,16 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define SHAPE_CIRCLE 1
 #define SHAPE_HEXAGON 2
 #define SHAPE_TRIANGLE 3
+#define SHAPE_DIAMOND 4
+#define SHAPE_BRICK 5
+#define SHAPE_OCTAGON 6
+#define SHAPE_CAIRO 7
+#define SHAPE_MOSAIC 8
+#define SHAPE_SHATTER 9
+#define SHAPE_COUNT 10
+
+/* jitter of a shatter seed inside its cell, lattice units */
+#define SHATTER_JITTER 0.8f
 
 #define DIR_INSIDE_OUT 0
 #define DIR_OUTSIDE_IN 1
@@ -81,6 +91,9 @@ struct vec2 {
 struct cell {
 	struct vec2 centre;
 	float metric;
+	float aa;   /* antialias width of this cell, relative to the shape's own */
+	float size; /* mosaic cell size, lattice units */
+	int kind;   /* octagon: 0 octagon, 1 corner square; cairo: orientation */
 };
 
 struct grid {
@@ -131,6 +144,118 @@ static struct vec2 hex_centre(struct vec2 q)
 	return c2;
 }
 
+static float fracf(float v)
+{
+	return v - floorf(v);
+}
+
+/* mirrors hash21()/hash22() in the effect */
+static float hash21(struct vec2 p)
+{
+	struct vec2 h = {fracf(p.x * 127.1f), fracf(p.y * 311.7f)};
+	float d = h.x * (h.x + 47.31f) + h.y * (h.y + 47.31f);
+
+	h.x += d;
+	h.y += d;
+	return fracf(h.x * h.y);
+}
+
+static struct vec2 hash22(struct vec2 p)
+{
+	struct vec2 q = {p.x + 19.73f, p.y + 19.73f};
+	struct vec2 out = {hash21(p), hash21(q)};
+
+	return out;
+}
+
+/* Seed of a shatter cell, jittered inside its own cell so the nearest seed to
+ * any pixel is always in the 3x3 block around it. */
+static struct vec2 shatter_seed(struct vec2 cell)
+{
+	struct vec2 h = hash22(cell);
+	struct vec2 s = {cell.x + 0.5f + (h.x - 0.5f) * SHATTER_JITTER, cell.y + 0.5f + (h.y - 0.5f) * SHATTER_JITTER};
+
+	return s;
+}
+
+/*
+ * One half plane of a Voronoi cell, as a gauge: the neighbouring seed cuts the
+ * owner's tile along the bisector between them, where this reads 1.
+ *
+ * Returns the gauge in x and, in y, how fast it climbs relative to a tile of
+ * the usual size: the nearer the neighbour, the nearer its cut and the steeper
+ * the climb.
+ */
+static struct vec2 shatter_cut(struct vec2 local, struct vec2 owner, float cx, float cy)
+{
+	struct vec2 cell = {cx, cy};
+	struct vec2 s = shatter_seed(cell);
+	struct vec2 d = {s.x - owner.x, s.y - owner.y};
+	float dd = d.x * d.x + d.y * d.y;
+	struct vec2 out = {0.0f, 0.0f};
+
+	if (dd < 1e-6f)
+		return out;
+
+	out.x = 2.0f * (local.x * d.x + local.y * d.y) / dd;
+	out.y = 1.0f / sqrtf(dd);
+	return out;
+}
+
+/* componentwise: the deepest cut is the metric, and the closest neighbour of
+ * the lot is the tile's steepest edge, which is the one its ramp has to be
+ * wide enough for */
+static struct vec2 cut_max(struct vec2 a, struct vec2 b)
+{
+	struct vec2 out = {a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y};
+
+	return out;
+}
+
+/* Gauge of the Cairo pentagon about its own seed. Every one of its five edges
+ * sits the same distance from the seed - the tiling is the Voronoi diagram of
+ * the snub square tiling, whose edges are all one length - so the gauge is the
+ * largest of five equal-weight half planes. */
+static float cairo_gauge(struct vec2 x)
+{
+	float m = x.y;
+
+	m = fmaxf(m, x.x * 0.8660254f + x.y * 0.5f);
+	m = fmaxf(m, x.x * 0.5f - x.y * 0.8660254f);
+	m = fmaxf(m, -x.x * 0.5f - x.y * 0.8660254f);
+	m = fmaxf(m, -x.x * 0.8660254f + x.y * 0.5f);
+	return m * 2.7320508f;
+}
+
+/* The same pentagon turned into one of the four orientations the tiling uses:
+ * 0 body up, 1 body down, 2 body left, 3 body right. */
+static struct vec2 cairo_frame(struct vec2 d, int orientation)
+{
+	struct vec2 out = d;
+
+	if (orientation == 1) {
+		out.x = -d.x;
+		out.y = -d.y;
+	} else if (orientation == 2) {
+		out.x = d.y;
+		out.y = -d.x;
+	} else if (orientation == 3) {
+		out.x = -d.y;
+		out.y = d.x;
+	}
+	return out;
+}
+
+static float octagon_metric(struct vec2 local)
+{
+	float ax = fabsf(local.x);
+	float ay = fabsf(local.y);
+	float m = (ax > ay ? ax : ay) * 2.0f;
+	float diag = (ax + ay) * 1.4142136f;
+
+	return m > diag ? m : diag;
+}
+
 static float shape_metric(int shape, struct vec2 local)
 {
 	float ax = fabsf(local.x);
@@ -140,14 +265,31 @@ static float shape_metric(int shape, struct vec2 local)
 		return (ax > ay ? ax : ay) * 2.0f;
 	if (shape == SHAPE_CIRCLE)
 		return sqrtf(local.x * local.x + local.y * local.y) * 1.7320508f;
+	if (shape == SHAPE_DIAMOND)
+		return ax * 2.0f + ay * 1.1547005f;
+	if (shape == SHAPE_BRICK)
+		return (ax * 2.0f > ay * 4.0f) ? ax * 2.0f : ay * 4.0f;
 
 	return (ax > ax * 0.5f + ay * 0.8660254f ? ax : ax * 0.5f + ay * 0.8660254f) * 2.0f;
+}
+
+static float clamp01(float v)
+{
+	if (v < 0.0f)
+		return 0.0f;
+	if (v > 1.0f)
+		return 1.0f;
+	return v;
 }
 
 static struct cell resolve_tile(int shape, struct vec2 q)
 {
 	struct cell cell;
 	struct vec2 local;
+
+	cell.aa = 1.0f;
+	cell.size = 1.0f;
+	cell.kind = 0;
 
 	if (shape == SHAPE_SQUARE) {
 		cell.centre.x = floorf(q.x) + 0.5f;
@@ -182,6 +324,150 @@ static struct cell resolve_tile(int shape, struct vec2 q)
 		cell.metric = 1.0f - 3.0f * mb;
 		cell.centre.x = cx + 0.5f * cy;
 		cell.centre.y = 0.8660254f * cy;
+	} else if (shape == SHAPE_DIAMOND) {
+		float g = q.x * 2.0f + q.y * 1.1547005f;
+		float h = q.x * 2.0f - q.y * 1.1547005f;
+		float gc = (floorf(g * 0.5f) + 0.5f) * 2.0f;
+		float hc = (floorf(h * 0.5f) + 0.5f) * 2.0f;
+
+		cell.centre.x = (gc + hc) * 0.25f;
+		cell.centre.y = (gc - hc) * 0.4330127f;
+		local.x = q.x - cell.centre.x;
+		local.y = q.y - cell.centre.y;
+		cell.metric = shape_metric(shape, local);
+	} else if (shape == SHAPE_BRICK) {
+		float row = floorf(q.y * 2.0f);
+		float off = 0.5f * (row - 2.0f * floorf(row * 0.5f));
+		float col = floorf(q.x - off);
+
+		cell.centre.x = col + 0.5f + off;
+		cell.centre.y = (row + 0.5f) * 0.5f;
+		local.x = q.x - cell.centre.x;
+		local.y = q.y - cell.centre.y;
+		cell.metric = shape_metric(shape, local);
+	} else if (shape == SHAPE_OCTAGON) {
+		struct vec2 oc = {floorf(q.x) + 0.5f, floorf(q.y) + 0.5f};
+		struct vec2 d = {q.x - oc.x, q.y - oc.y};
+		float mo = octagon_metric(d);
+
+		if (mo <= 1.0f) {
+			cell.centre = oc;
+			cell.metric = mo;
+		} else {
+			/* the corners the octagons leave behind meet in a square
+			 * standing on its point, centred on the lattice corner */
+			cell.centre.x = floorf(q.x + 0.5f);
+			cell.centre.y = floorf(q.y + 0.5f);
+			cell.metric = (fabsf(q.x - cell.centre.x) + fabsf(q.y - cell.centre.y)) * 3.4142136f;
+			cell.aa = 2.4142136f;
+			cell.kind = 1;
+		}
+	} else if (shape == SHAPE_CAIRO) {
+		/*
+		 * One pentagon per edge of a square lattice of four-fold
+		 * vertices, pinwheeled around each vertex: on even cells the
+		 * two pentagons standing on the horizontal edges fill most of
+		 * the cell and the two on the vertical edges poke their apexes
+		 * in, and odd cells are the same pattern turned a quarter turn.
+		 */
+		const float seed_x[4] = {0.5f, 0.5f, -0.1339746f, 1.1339746f};
+		const float seed_y[4] = {0.1339746f, 0.8660254f, 0.5f, 0.5f};
+		/* an odd cell's tiles sit a quarter turn on from an even one */
+		const int turned[4] = {2, 3, 1, 0};
+		struct vec2 ic = {floorf(q.x), floorf(q.y)};
+		struct vec2 f = {q.x - ic.x, q.y - ic.y};
+		struct vec2 g = f;
+		int odd = ((int)(ic.x + ic.y)) & 1;
+		int best = 0;
+		float best_m = 0.0f;
+		int i;
+
+		if (odd) {
+			g.x = f.y;
+			g.y = 1.0f - f.x;
+		}
+
+		for (i = 0; i < 4; i++) {
+			struct vec2 d = {g.x - seed_x[i], g.y - seed_y[i]};
+			float m = cairo_gauge(cairo_frame(d, i));
+
+			if (i == 0 || m < best_m) {
+				best_m = m;
+				best = i;
+			}
+		}
+
+		cell.metric = best_m;
+		cell.kind = odd ? turned[best] : best;
+		if (odd) {
+			cell.centre.x = ic.x + 1.0f - seed_y[best];
+			cell.centre.y = ic.y + seed_x[best];
+		} else {
+			cell.centre.x = ic.x + seed_x[best];
+			cell.centre.y = ic.y + seed_y[best];
+		}
+	} else if (shape == SHAPE_MOSAIC) {
+		/* squares that quarter themselves, twice, on their own hash */
+		struct vec2 o = {floorf(q.x), floorf(q.y)};
+		float sz = 1.0f;
+		int level;
+
+		for (level = 0; level < 2; level++) {
+			struct vec2 key = {o.x + sz * 0.5f, o.y + sz * 0.5f};
+
+			if (hash21(key) >= 0.5f)
+				break;
+
+			sz *= 0.5f;
+			o.x += clamp01(floorf((q.x - o.x) / sz)) * sz;
+			o.y += clamp01(floorf((q.y - o.y) / sz)) * sz;
+		}
+
+		cell.centre.x = o.x + sz * 0.5f;
+		cell.centre.y = o.y + sz * 0.5f;
+		local.x = fabsf(q.x - cell.centre.x);
+		local.y = fabsf(q.y - cell.centre.y);
+		cell.metric = (local.x > local.y ? local.x : local.y) * 2.0f / sz;
+		cell.aa = 1.0f / sz;
+		cell.size = sz;
+	} else if (shape == SHAPE_SHATTER) {
+		struct vec2 b = {floorf(q.x), floorf(q.y)};
+		struct vec2 owner = shatter_seed(b);
+		float bd = (q.x - owner.x) * (q.x - owner.x) + (q.y - owner.y) * (q.y - owner.y);
+		struct vec2 oc;
+		struct vec2 m;
+		int i, j;
+
+		for (j = -1; j <= 1; j++) {
+			for (i = -1; i <= 1; i++) {
+				struct vec2 c = {b.x + (float)i, b.y + (float)j};
+				struct vec2 s = shatter_seed(c);
+				float d = (q.x - s.x) * (q.x - s.x) + (q.y - s.y) * (q.y - s.y);
+
+				if (d < bd) {
+					bd = d;
+					owner = s;
+				}
+			}
+		}
+
+		/* the tile is what the seeds around the owner leave it */
+		oc.x = floorf(owner.x);
+		oc.y = floorf(owner.y);
+		local.x = q.x - owner.x;
+		local.y = q.y - owner.y;
+		m.x = 0.0f;
+		m.y = 0.0f;
+
+		for (j = -1; j <= 1; j++) {
+			for (i = -1; i <= 1; i++) {
+				m = cut_max(m, shatter_cut(local, owner, oc.x + (float)i, oc.y + (float)j));
+			}
+		}
+
+		cell.centre = owner;
+		cell.metric = m.x;
+		cell.aa = m.y;
 	} else {
 		cell.centre = hex_centre(q);
 		local.x = q.x - cell.centre.x;
@@ -190,6 +476,42 @@ static struct cell resolve_tile(int shape, struct vec2 q)
 	}
 
 	return cell;
+}
+
+/*
+ * What a given cell makes of an arbitrary pixel. resolve_tile() only answers
+ * for the cell that owns a pixel; this asks a neighbour, which is what the
+ * overlap check needs. Triangles are the one shape left out: their metric is
+ * barycentric and the effect never asks a triangle about a pixel it does not
+ * own, so the orientation is not carried on the cell.
+ */
+static float metric_at(int shape, const struct cell *c, struct vec2 q)
+{
+	struct vec2 local = {q.x - c->centre.x, q.y - c->centre.y};
+
+	if (shape == SHAPE_OCTAGON)
+		return c->kind == 0 ? octagon_metric(local) : (fabsf(local.x) + fabsf(local.y)) * 3.4142136f;
+	if (shape == SHAPE_CAIRO)
+		return cairo_gauge(cairo_frame(local, c->kind));
+	if (shape == SHAPE_MOSAIC) {
+		float ax = fabsf(local.x), ay = fabsf(local.y);
+
+		return (ax > ay ? ax : ay) * 2.0f / c->size;
+	}
+	if (shape == SHAPE_SHATTER) {
+		float ox = floorf(c->centre.x), oy = floorf(c->centre.y);
+		struct vec2 m = {0.0f, 0.0f};
+		int i, j;
+
+		for (j = -1; j <= 1; j++) {
+			for (i = -1; i <= 1; i++) {
+				m = cut_max(m, shatter_cut(local, c->centre, ox + (float)i, oy + (float)j));
+			}
+		}
+		return m.x;
+	}
+
+	return shape_metric(shape, local);
 }
 
 static float saturatef(float v)
@@ -307,9 +629,23 @@ static void sweep_extent(int direction, float angle, struct vec2 origin, float c
 /* mirror of tiles_circumradius() in src/tiles-transition.c */
 static float circumradius(int shape, float tile_px)
 {
-	if (shape == SHAPE_SQUARE)
+	switch (shape) {
+	case SHAPE_SQUARE:
+	case SHAPE_MOSAIC:
 		return tile_px * 0.7071068f;
-	return tile_px * 0.5773503f;
+	case SHAPE_DIAMOND:
+		return tile_px * 0.8660254f;
+	case SHAPE_BRICK:
+		return tile_px * 0.5590170f;
+	case SHAPE_OCTAGON:
+		return tile_px * 0.5411961f;
+	case SHAPE_CAIRO:
+		return tile_px * 0.5176381f;
+	case SHAPE_SHATTER:
+		return tile_px * 1.4000000f;
+	default:
+		return tile_px * 0.5773503f;
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -323,8 +659,20 @@ static const char *shape_name(int shape)
 		return "circle";
 	case SHAPE_HEXAGON:
 		return "hexagon";
-	default:
+	case SHAPE_TRIANGLE:
 		return "triangle";
+	case SHAPE_DIAMOND:
+		return "diamond";
+	case SHAPE_BRICK:
+		return "brick";
+	case SHAPE_OCTAGON:
+		return "octagon";
+	case SHAPE_CAIRO:
+		return "cairo";
+	case SHAPE_MOSAIC:
+		return "mosaic";
+	default:
+		return "shatter";
 	}
 }
 
@@ -403,7 +751,7 @@ static void test_full_coverage(void)
 	const float origins[][2] = {{960.0f, 540.0f}, {0.0f, 0.0f}, {1920.0f, 1080.0f}, {-480.0f, 1600.0f}};
 	int shape, i, j, k;
 
-	for (shape = 0; shape < 4; shape++) {
+	for (shape = 0; shape < SHAPE_COUNT; shape++) {
 		for (i = 0; i < 4; i++) {
 			for (j = 0; j < 5; j++) {
 				for (k = 0; k < 4; k++) {
@@ -445,7 +793,7 @@ static void test_growth_profile(void)
 	const float scales[] = {0.0f, 0.25f, 0.5f, 0.75f, 0.999f};
 	int shape, i;
 
-	for (shape = 0; shape < 4; shape++) {
+	for (shape = 0; shape < SHAPE_COUNT; shape++) {
 		struct grid g;
 		double previous = -1.0;
 
@@ -485,21 +833,26 @@ static void test_growth_profile(void)
 	}
 }
 
-/* Claim: the shapes tile, they do not stack. A pixel belongs to exactly one
- * tile for the three gap-free shapes. */
+/*
+ * Claim: the shapes tile, they do not stack. A pixel belongs to exactly one
+ * tile, so no other tile anywhere near it claims the pixel at full scale.
+ *
+ * The neighbours are found rather than listed: the pixels in a ring around the
+ * sample are resolved, and every distinct tile that turns up is asked what it
+ * makes of the sample itself. That covers the shapes whose neighbours are not
+ * a fixed set - mosaic cells differ in size, shatter cells differ in
+ * everything - without a table per shape.
+ */
 static void test_tiles_do_not_overlap(void)
 {
-	const int shapes[] = {SHAPE_SQUARE, SHAPE_HEXAGON};
-	const float square_x[4] = {1.0f, -1.0f, 0.0f, 0.0f};
-	const float square_y[4] = {0.0f, 0.0f, 1.0f, -1.0f};
-	const float hex_x[6] = {1.0f, -1.0f, 0.5f, -0.5f, 0.5f, -0.5f};
-	const float hex_y[6] = {0.0f, 0.0f, 0.8660254f, 0.8660254f, -0.8660254f, -0.8660254f};
-	int s, i;
+	const int shapes[] = {SHAPE_SQUARE,  SHAPE_HEXAGON, SHAPE_DIAMOND, SHAPE_BRICK,
+			      SHAPE_OCTAGON, SHAPE_CAIRO,   SHAPE_MOSAIC,  SHAPE_SHATTER};
+	const float radii[] = {0.3f, 0.6f, 0.9f, 1.2f, 1.5f};
+	int s, i, k, a;
 
-	for (s = 0; s < 2; s++) {
+	for (s = 0; s < (int)(sizeof(shapes) / sizeof(shapes[0])); s++) {
 		struct grid g;
 		int shape = shapes[s];
-		int neighbours = shape == SHAPE_SQUARE ? 4 : 6;
 
 		g.shape = shape;
 		g.tile_px = 71.0f;
@@ -508,23 +861,168 @@ static void test_tiles_do_not_overlap(void)
 		g.rot.x = cosf(0.4f);
 		g.rot.y = sinf(0.4f);
 
-		for (i = 0; i < 20000; i++) {
+		for (i = 0; i < 3000; i++) {
+			struct vec2 p = {(float)(rand() % 192000) / 100.0f, (float)(rand() % 108000) / 100.0f};
+			struct vec2 q = to_lattice(&g, p);
+			struct cell own = resolve_tile(shape, q);
+
+			/* the cell has to agree with itself first, or the check
+			 * below is measuring the wrong thing */
+			check(fabsf(metric_at(shape, &own, q) - own.metric) < 1e-3f,
+			      "%s cell at %.3f/%.3f reads its own pixel as %.6f, not the %.6f it resolved to",
+			      shape_name(shape), own.centre.x, own.centre.y, metric_at(shape, &own, q), own.metric);
+
+			for (k = 0; k < (int)(sizeof(radii) / sizeof(radii[0])); k++) {
+				for (a = 0; a < 12; a++) {
+					float ang = (float)a * (float)M_PI / 6.0f;
+					struct vec2 probe = {q.x + radii[k] * cosf(ang), q.y + radii[k] * sinf(ang)};
+					struct cell other = resolve_tile(shape, probe);
+					float dx = other.centre.x - own.centre.x;
+					float dy = other.centre.y - own.centre.y;
+
+					if (dx * dx + dy * dy < 1e-8f)
+						continue;
+
+					check(metric_at(shape, &other, q) >= 1.0f - 1e-4f,
+					      "%s tiles overlap: pixel %.2f/%.2f sits inside the tile at "
+					      "%.3f/%.3f as well as its own at %.3f/%.3f",
+					      shape_name(shape), p.x, p.y, other.centre.x, other.centre.y, own.centre.x,
+					      own.centre.y);
+				}
+			}
+		}
+	}
+}
+
+/* mirror of tiles_edge_width() in src/tiles-transition.c, as metric units per
+ * lattice unit rather than per pixel */
+static float edge_gradient(int shape)
+{
+	switch (shape) {
+	case SHAPE_CIRCLE:
+		return 1.7320508f;
+	case SHAPE_TRIANGLE:
+		return 3.4641016f;
+	case SHAPE_DIAMOND:
+		return 2.3094011f;
+	case SHAPE_BRICK:
+		return 4.0f;
+	case SHAPE_CAIRO:
+		return 2.7320508f;
+	default:
+		return 2.0f;
+	}
+}
+
+/*
+ * The coverage ramp is a fixed width in metric units, chosen per shape so it
+ * comes out about a pixel wide on screen. That only works if the metric really
+ * does climb at the rate the constant assumes: too slow and the edges blur,
+ * too fast and they alias. Mixed size tilings scale the ramp per cell, so the
+ * claim is that the metric never climbs faster than the shape's own rate times
+ * the cell's own scale, and that it gets close enough somewhere to be worth
+ * the width.
+ *
+ * Triangles are checked by hand instead: their metric is 1 - 3 * min(bary),
+ * each barycentric climbs at 1 / height = 1.1547 per lattice unit, so the
+ * metric climbs at 3.4641 - exactly the constant above.
+ */
+static void test_ramp_matches_the_metric(void)
+{
+	const float step = 1e-3f;
+	int shape, i;
+
+	for (shape = 0; shape < SHAPE_COUNT; shape++) {
+		struct grid g;
+		float steepest = 0.0f;
+
+		if (shape == SHAPE_TRIANGLE)
+			continue;
+
+		g.shape = shape;
+		g.tile_px = 96.0f;
+		g.origin.x = 0.0f;
+		g.origin.y = 0.0f;
+		g.rot.x = 1.0f;
+		g.rot.y = 0.0f;
+
+		for (i = 0; i < 3000; i++) {
 			struct vec2 p = {(float)(rand() % 192000) / 100.0f, (float)(rand() % 108000) / 100.0f};
 			struct vec2 q = to_lattice(&g, p);
 			struct cell cell = resolve_tile(shape, q);
-			int n;
+			float allowed = edge_gradient(shape) * cell.aa;
+			float grad = 0.0f;
+			int a;
 
-			for (n = 0; n < neighbours; n++) {
-				struct vec2 local;
+			/*
+			 * The metric is a max of linear pieces, so a difference
+			 * taken across two axes can straddle a corner between
+			 * two of them and read steeper than either. Sweeping the
+			 * direction instead and keeping the steepest one-sided
+			 * rate gives the gradient of whichever face is crossed,
+			 * which is what the ramp is set against.
+			 */
+			for (a = 0; a < 24; a++) {
+				float ang = (float)a * (float)M_PI / 12.0f;
+				struct vec2 probe = {q.x + step * cosf(ang), q.y + step * sinf(ang)};
+				float rate = (metric_at(shape, &cell, probe) - cell.metric) / step;
 
-				local.x = q.x - (cell.centre.x + (shape == SHAPE_SQUARE ? square_x[n] : hex_x[n]));
-				local.y = q.y - (cell.centre.y + (shape == SHAPE_SQUARE ? square_y[n] : hex_y[n]));
-
-				check(shape_metric(shape, local) >= 1.0f - 1e-4f,
-				      "%s tiles overlap: pixel %.2f/%.2f sits inside two tiles at full scale",
-				      shape_name(shape), p.x, p.y);
+				if (rate > grad)
+					grad = rate;
 			}
+
+			check(grad <= allowed * 1.001f + 1e-3f,
+			      "%s metric climbs at %.4f per lattice unit where the ramp is set for %.4f, so its "
+			      "edges would alias",
+			      shape_name(shape), grad, allowed);
+
+			if (grad / cell.aa > steepest)
+				steepest = grad / cell.aa;
 		}
+
+		check(steepest >= edge_gradient(shape) * 0.5f,
+		      "%s never climbs faster than %.4f per lattice unit but its ramp is set for %.4f, so its "
+		      "edges are softer than they need to be",
+		      shape_name(shape), steepest, edge_gradient(shape));
+	}
+}
+
+/*
+ * The sweep extent is padded by one circumradius so a tile whose centre sits
+ * off canvas still takes its turn. That only holds if the constant really is
+ * the furthest a pixel can be from the centre of the tile that owns it.
+ */
+static void test_circumradius_covers_the_tile(void)
+{
+	int shape, i;
+
+	for (shape = 0; shape < SHAPE_COUNT; shape++) {
+		struct grid g;
+		float worst = 0.0f;
+		float limit = circumradius(shape, 64.0f);
+
+		g.shape = shape;
+		g.tile_px = 64.0f;
+		g.origin.x = 640.0f;
+		g.origin.y = 360.0f;
+		g.rot.x = cosf(0.3f);
+		g.rot.y = sinf(0.3f);
+
+		for (i = 0; i < 40000; i++) {
+			struct vec2 p = {(float)(rand() % 192000) / 100.0f, (float)(rand() % 108000) / 100.0f};
+			struct cell cell = resolve_tile(shape, to_lattice(&g, p));
+			struct vec2 centre = from_lattice(&g, cell.centre);
+			float dx = p.x - centre.x, dy = p.y - centre.y;
+			float r = sqrtf(dx * dx + dy * dy);
+
+			if (r > worst)
+				worst = r;
+		}
+
+		check(worst <= limit,
+		      "%s pixels reach %.3f px from their own tile centre, past the %.3f px the "
+		      "sweep is padded by",
+		      shape_name(shape), worst, limit);
 	}
 }
 
@@ -540,7 +1038,7 @@ static void test_sweep_completes(void)
 	const int easings[] = {EASE_LINEAR, EASE_IN_OUT, EASE_OUT};
 	int direction, o, a, shape, e;
 
-	for (shape = 0; shape < 4; shape++)
+	for (shape = 0; shape < SHAPE_COUNT; shape++)
 		for (direction = 0; direction < 5; direction++) {
 			for (o = 0; o < 6; o++) {
 				for (a = 0; a < 5; a++) {
@@ -735,6 +1233,8 @@ int main(void)
 	test_full_coverage();
 	test_growth_profile();
 	test_tiles_do_not_overlap();
+	test_circumradius_covers_the_tile();
+	test_ramp_matches_the_metric();
 	test_sweep_completes();
 	test_cover_is_opaque_at_the_switch();
 	test_wave_fits_the_sweep();
