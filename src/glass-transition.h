@@ -16,26 +16,8 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
+#pragma once
+
 #include <obs-module.h>
-#include <plugin-support.h>
 
-#include "glass-transition.h"
-#include "tiles-transition.h"
-#include "vortex-transition.h"
-
-OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
-
-bool obs_module_load(void)
-{
-	obs_register_source(&tiles_transition);
-	obs_register_source(&vortex_transition);
-	obs_register_source(&glass_transition);
-	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
-	return true;
-}
-
-void obs_module_unload(void)
-{
-	obs_log(LOG_INFO, "plugin unloaded");
-}
+extern struct obs_source_info glass_transition;

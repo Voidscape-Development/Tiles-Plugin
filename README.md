@@ -1,12 +1,14 @@
 # Tiles
 
-Scene transitions for OBS Studio. The module provides two, both generated on the
-GPU with no bundled video:
+Scene transitions for OBS Studio. The module provides three, all generated on
+the GPU with no bundled video:
 
 - **Tiling Transition** — the screen is divided into a lattice of shapes that
   animate in sequence to carry you from one scene to the next.
 - **Vortex Transition** — a spiral portal tears open over the outgoing scene,
   swallows the canvas, and lets the incoming one back in through the smoke.
+- **Glass Transition** — the outgoing scene cracks from a point of impact,
+  holds a beat, and the shards fall away to leave the incoming one.
 
 ## Installing
 
@@ -144,6 +146,85 @@ coordinate system rather than being warped into place afterwards.
 | **Smoke Scale** / **Smoke Softness** | Size and edge width of the tendrils the incoming scene comes back through. |
 | **Swirl the scenes into the vortex** | Off by default. Screws the outgoing scene down into the centre and unwinds the incoming one back out of it, instead of leaving both flat behind the vortex. The first and last frame are untouched either way. |
 
+# Glass Transition
+
+The outgoing scene is a pane of glass. It cracks from wherever it was struck,
+the break races out to the corners, and then the shards let go.
+
+Unlike the other two, this one is not a full screen shader. The pane is a real
+mesh of triangles, cut on the CPU and flown by its vertex shader, because a
+shard that leaves the frame, turns over or sails past the camera is not
+something a fragment shader can work out from the pixel it lands on. The shards
+are drawn back to front, which is enough: falling glass is flat planes that
+never intersect.
+
+## Break styles
+
+| Style | What it does |
+| --- | --- |
+| **Window Break** | The shards let go and fall away under gravity, with a push outwards from the impact. The classic broken window. |
+| **Blow Outward** | The shards blast away from the impact and past the camera, growing as they pass it. |
+| **Crack Wipe** | Nothing moves. The cracks spread and the incoming scene arrives shard by shard behind the front, the cracks fading with the scene they belonged to. |
+| **Shatter Out, Assemble In** | Two breaks crossing: the outgoing scene leaves as shards while the incoming one flies in as shards and lands, the last of them seating exactly on the final frame. The scene behind is held down so a shard that has not landed yet reads as missing. |
+
+## Crack patterns
+
+| Pattern | What it is |
+| --- | --- |
+| **Spiderweb** | Radial spokes crossed by concentric rings, spaced geometrically so the shards grow as they get further from the impact — fine splintering where it was struck, big slabs out at the edges. Both fall out of the one ratio. |
+| **Voronoi** | The cells of a jittered lattice of seeds: irregular angular shards with no focal point. The same construction as the `Shatter` tile shape, resolved into real polygons rather than sampled per pixel. |
+| **Cracked Ice** | The canvas cut by straight cracks, each piece split again until the pieces are down to size. No lattice, so the shards come out in a wide range of sizes and long splinters appear on their own. The cuts are steered by the impact, so the break still reads as having a source. |
+
+Whichever pattern is picked, the shards are an exact partition of the canvas:
+every pixel belongs to one shard and no pixel belongs to two. Every cell is
+built by cutting a convex region with half planes, and two cells that share a
+cut share the line it was computed from, so there is no gap for the incoming
+scene to show through before the shards have moved.
+
+## Timing
+
+The transition runs in three phases, and every shard's flight fits inside it:
+
+1. **Crack** — the front races out from the impact. The break is sized to the
+   furthest corner as seen from wherever the pane was struck, so the whole pane
+   is cracked by the end of this phase even with the impact pushed outside the
+   frame.
+2. **Hold** — the cracked pane sits still, long enough to read.
+3. **Flight** — the shards let go, nearest the impact first. The window each
+   one gets runs from wherever it starts to the end of the transition, so the
+   last shard to let go still finishes exactly on the final frame.
+
+**Crack Easing** shapes the order the shards crack in, not the transition clock,
+so the crack front can accelerate away and settle while the shards themselves
+still fall at a steady rate — the same distinction the tiling transition makes.
+
+## Settings
+
+| Setting | What it does |
+| --- | --- |
+| **Preset** | A whole look in one pick: break style, crack pattern, timing, motion and glass finish together. Changing any of them afterwards puts this back to Custom. |
+| **Shard Size** | In pixels at your canvas resolution. There is a ceiling on the shard count, so on a large canvas a very small size stops getting smaller rather than building a mesh too big to draw — it gives fewer, larger shards, never a partial break. |
+| **Break Seed** | Which break you get, without changing anything about how it looks. The same seed always gives the same break, so a transition plays the same way every time. |
+| **Impact Centre X/Y** | Where the pane is struck. Can be pushed outside the frame (−50% to 150%); the break is always sized to the furthest corner from wherever it sits. |
+| **Crack Spread** / **Hold** | The phase split, as shares of the transition. The hold is held above zero so the break is always readable before it comes apart. |
+| **Gravity Direction** / **Gravity** | Which way the shards fall and how hard. 0° pulls to the right, 90° straight down, matching the tiling transition's angle convention. |
+| **Throw** | How hard the shards are pushed away from the impact as they let go. It is an impulse and gravity is an acceleration, so one is linear in the flight and the other goes with its square — that is the whole of the ballistics. |
+| **Spin** | Turns a shard makes over its whole flight. Each takes its own axis and direction, so they tumble rather than rotating together. |
+| **Scatter** | Blends the ordered break towards a shuffle: shards stop letting go in step with the crack front and stop flying straight out along their own radius. |
+| **Flat shards** | Keeps the shards in the screen plane instead of tumbling through it. Cleaner and more graphic, and it also means they no longer have to be depth sorted each frame. |
+| **Crack Colour** | Lights the cracks, the bevel along each cut edge, and the glint. |
+| **Crack Width** / **Crack Glow** | The hairline along each cut, and how hard it burns as it forms. The flash travels with the crack front rather than lighting the whole break at once. |
+| **Edge Light** / **Edge Light Width** | The lit bevel that gives the shards thickness. A shard caught at a glancing angle picks up more of it, the way a real one does as it turns over. |
+| **Refraction** | How far the scene is bent near a shard's edges, as though seen through a thick broken pane. Measured in pixels at the very edge, falling to nothing in the middle. |
+| **Shard Variation** | Randomly lightens and darkens each shard, so the break reads as many pieces of glass rather than one image cut up. |
+| **Glint** | A highlight sweeping across the pane as it breaks. It tracks where each shard started rather than where it has flown to, so it reads as one light crossing a sheet of glass. |
+
+Every one of the glass looks is gated on the crack front, which is what makes
+the first frame of the transition the outgoing scene exactly — no seams between
+shards, no rim light, no tint — and the last frame the incoming scene the same
+way, by the shards having either faded out or landed.
+
+
 ## Building
 
 Standard OBS plugin template layout. See the
@@ -163,6 +244,18 @@ transition depends on: that each shape covers the canvas completely at full
 scale (across tile sizes, grid rotations and origins, including origins outside
 the frame), and that every tile's turn falls inside the transition so nothing is
 left unfinished.
+
+`test/test-glass.c` covers the glass transition differently, because that one
+builds its shards in C rather than in a shader: the test links `src/glass-mesh.c`
+directly instead of mirroring it. It checks the two properties the transition
+rests on — that the shards are an exact partition of the canvas for every
+pattern, shard size and impact point, including impacts outside the frame, and
+that every shard's flight fits inside the transition, seated and opaque on the
+first frame and finished on the last. It also checks that the seam bleed only
+ever grows a shard, that every cell is convex with its centroid inside it (the
+shards are drawn as a fan from that point), that the shard ceiling gives fewer
+larger shards rather than a partial break, and that the same settings always
+give the same break.
 
 `test/test-vortex.c` does the same for `data/effects/vortex_transition.effect`:
 that the transition starts on an untouched outgoing scene and ends on an
@@ -197,6 +290,17 @@ a graphics device, so it is kept out of the ctest suite:
 cmake -S . -B build -DENABLE_GPU_TESTS=ON
 cmake --build build
 xvfb-run -a ./build/gpu-check data/effects/tiles_transition.effect
+```
+
+`test/glass-check.c` is the same idea for the glass transition, which needs its
+own because it draws a mesh rather than a sprite. It builds the real shards,
+uploads them and renders every break style and crack pattern. A vertex layout
+that does not match what the shader declares, a triangle wound the wrong way, a
+seam the bleed fails to close, or a first frame that is not quite the outgoing
+scene all show up here and nowhere else:
+
+```sh
+xvfb-run -a ./build/glass-check data/effects/glass_transition.effect
 ```
 
 ## Licence
