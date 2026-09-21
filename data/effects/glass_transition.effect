@@ -1,0 +1,389 @@
+/*
+ * Glass - a shattering scene transition for OBS Studio.
+ *
+ * The other two transitions in this module are full screen shaders that work
+ * out, per pixel, what should be there. This one is not: the pane is a real
+ * mesh of triangles, built on the CPU by src/glass-mesh.c, and the shards are
+ * flown by moving their vertices. That is what lets a shard leave the frame
+ * entirely, turn over, and pass the camera, none of which a fragment shader can
+ * do without searching the whole canvas for whatever landed on the pixel.
+ *
+ * So the work is split:
+ *
+ *   VSGlass  - places a shard. It evaluates the same motion as
+ *              glass_shard_xform() in src/glass-mesh.c, because the CPU has to
+ *              know where the shards are to sort them back to front and the GPU
+ *              has to know to draw them. That function is the one piece of this
+ *              transition that exists twice; both copies say so.
+ *
+ *   PSGlass  - lights it. Cracks, rim, refraction, glint and tint all hang off
+ *              two interpolated values: how far the pixel is from the shard's
+ *              cut edge, and how far the crack front has got past this shard.
+ *
+ * Every one of those looks is multiplied by the crack term, which is zero until
+ * the front arrives. That is not a stylistic choice - it is what makes the
+ * first frame of the transition the outgoing scene exactly, pixel for pixel,
+ * with no seam, no rim and no tint on it. The last frame is the incoming scene
+ * the same way, by the shards having faded out or landed.
+ *
+ * The mesh is drawn back to front with no depth buffer, so a shard is a flat
+ * plane that never intersects another one - which is true of falling glass and
+ * is why the painter's order is enough.
+ */
+
+uniform float4x4 ViewProj;
+uniform texture2d a_tex;
+uniform texture2d b_tex;
+
+uniform float2 canvas;    /* render target size, pixels */
+uniform float2 impact_px; /* where the pane was struck, pixels */
+uniform float reach;      /* pixels from the impact to the furthest corner */
+
+uniform float progress; /* transition time, 0..1 */
+uniform float hold_end; /* progress at which the shards let go */
+
+/* How far the crack front has swept, already eased. The same for every pixel in
+ * a frame, so glass_crack_front() works it out on the CPU - which also keeps
+ * the easing curve out of here and in one place. */
+uniform float crack_front;
+
+uniform int style;        /* 0 window, 1 blow, 2 wipe, 3 assemble */
+uniform bool flat_shards; /* keep the shards in the screen plane - `flat` is a
+                             reserved word once this is converted to GLSL */
+uniform bool arriving;    /* run the flight backwards, so the shard lands */
+uniform bool use_b;       /* this pass carries the incoming scene, not the outgoing one */
+
+uniform float2 gravity_dir; /* unit length */
+uniform float gravity;      /* 0..1 */
+uniform float throw_amt;    /* 0..1 */
+uniform float spin;         /* tumble turns over a whole flight */
+uniform float scatter;      /* 0 ordered, 1 every shard on its own */
+uniform float focal;        /* camera distance, pixels; larger is flatter */
+
+uniform float4 crack_color; /* what a fresh crack lights up */
+uniform float crack_px;     /* crack line width, pixels */
+uniform float crack_glow;   /* how hard a crack burns as it forms */
+uniform float rim_amount;   /* brightness of the lit bevel along a cut edge */
+uniform float rim_px;       /* how far in from the edge the bevel reaches */
+uniform float refract_px;   /* how far the scene is pushed about near an edge */
+uniform float tint_amount;  /* per shard brightness spread */
+uniform float glint_amount; /* brightness of the sweeping highlight */
+
+/* The glint is a band travelling across the canvas. Where it has got to is the
+ * same for every pixel in a frame, so it is worked out on the CPU - the same
+ * division of labour the vortex transition uses for its phase clocks. */
+uniform float glint_pos;  /* band centre, in projected units, 0..1 */
+uniform float2 glint_dir; /* the axis it travels along, unit length */
+
+/* Scales the incoming scene behind the shards. 1 leaves it alone; the assemble
+ * style holds it down so that a shard which has not landed yet reads as missing
+ * rather than as already in place. */
+uniform float bg_level;
+
+sampler_state textureSampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+#define TAU 6.2831853
+
+#define STYLE_WINDOW   0
+#define STYLE_BLOW     1
+#define STYLE_WIPE     2
+#define STYLE_ASSEMBLE 3
+
+/* mirrors GLASS_CRACK_EDGE in src/glass-mesh.h */
+#define CRACK_EDGE 0.12
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+/* ------------------------------------------------------------------ */
+/* the mesh                                                           */
+/* ------------------------------------------------------------------ */
+
+struct GlassVertIn {
+	float4 pos   : POSITION;  /* canvas pixels */
+	float2 uv    : TEXCOORD0; /* where this corner samples the scene */
+	float4 shard : TEXCOORD1; /* centroid.xy, core, launch */
+	float4 rnd   : TEXCOORD2; /* three per shard randoms, then the inradius */
+};
+
+struct GlassVertOut {
+	float4 pos   : POSITION;
+	float2 uv    : TEXCOORD0;
+	float4 edge  : TEXCOORD1; /* refraction direction.xy, core, crack */
+	float4 light : TEXCOORD2; /* shard normal.xyz, alpha */
+	float4 look  : TEXCOORD3; /* inradius, crack flash, reveal, tint */
+};
+
+struct ShardState {
+	float3 off;
+	float3 axis;
+	float angle;
+	float alpha;
+	float crack;
+	float flash;
+	float reveal;
+	float settle;
+};
+
+/*
+ * NOTE: mirrors glass_shard_xform() in src/glass-mesh.c, which places the same
+ * shard on the CPU for the depth sort and is what test/test-glass.c holds the
+ * motion to. Keep the two in sync.
+ */
+ShardState shard_xform(float2 pivot, float launch, float3 rnd)
+{
+	ShardState st;
+	float order = saturate(launch + (rnd.x - launch) * saturate(scatter) * 0.7);
+	float start = hold_end + (1.0 - hold_end) * order * 0.30;
+	float m = saturate((progress - start) / max(1.0 - start, 0.0001));
+	float k;
+	float2 dir;
+	float len;
+	float ang;
+	float spread;
+	float fling;
+	float fall;
+	float turns;
+
+	st.off = float3(0.0, 0.0, 0.0);
+	st.axis = float3(0.0, 0.0, 1.0);
+	st.angle = 0.0;
+	st.alpha = 1.0;
+	st.reveal = 0.0;
+	st.settle = 1.0;
+
+	st.crack = saturate((crack_front - order) / CRACK_EDGE);
+
+	/* brightest as the crack is actually running through the shard, so the
+	 * break travels as a flash rather than lighting up everywhere at once */
+	st.flash = st.crack * (1.0 - st.crack) * 4.0;
+
+	if (style == STYLE_WIPE) {
+		/* the break belongs to the scene it broke, so it goes with it */
+		st.reveal = smoothstep(0.0, 1.0, m);
+		st.settle = 1.0 - st.reveal;
+		return st;
+	}
+
+	k = arriving ? 1.0 - m : m;
+	st.alpha = 1.0 - smoothstep(0.72, 1.0, k);
+
+	/* an arriving shard is glass until it seats itself and the scene
+	 * afterwards; a leaving one has faded out by then */
+	if (arriving)
+		st.settle = smoothstep(0.0, 0.25, k);
+
+	dir = pivot - impact_px;
+	len = length(dir);
+	dir = len > 0.001 ? dir / len : float2(0.0, -1.0);
+
+	ang = (rnd.y - 0.5) * saturate(scatter) * 1.6;
+	dir = float2(dir.x * cos(ang) - dir.y * sin(ang), dir.x * sin(ang) + dir.y * cos(ang));
+
+	/* an impulse outwards and a constant pull: one linear in the flight,
+	 * the other going with its square */
+	spread = 0.55 + rnd.z * 0.9;
+	fling = throw_amt * k * reach * 0.85 * spread;
+	fall = gravity * k * k * reach * 1.25;
+
+	st.off.xy = dir * fling + gravity_dir * fall;
+
+	if (style == STYLE_BLOW)
+		st.off.z = throw_amt * k * reach * 0.55 * (0.35 + rnd.z * 0.9);
+	else
+		st.off.z = k * k * reach * 0.10 * (rnd.z - 0.45);
+
+	if (flat_shards) {
+		st.axis = float3(0.0, 0.0, 1.0);
+		st.off.z = 0.0;
+	} else {
+		float a = rnd.y * TAU;
+		float az = (rnd.z - 0.5) * 1.2;
+
+		st.axis = normalize(float3(cos(a), sin(a), az));
+	}
+
+	turns = spin * (0.35 + rnd.x * 1.3) * (rnd.y < 0.5 ? -1.0 : 1.0);
+	st.angle = turns * TAU * k;
+
+	return st;
+}
+
+/* Rodrigues: turn v about the unit axis k by a. Cheaper than building the
+ * matrix when it is used twice per vertex. */
+float3 rotate_axis(float3 v, float3 k, float a)
+{
+	float c = cos(a);
+	float s = sin(a);
+
+	return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c);
+}
+
+GlassVertOut VSGlass(GlassVertIn v_in)
+{
+	GlassVertOut vert_out;
+	float2 pivot = v_in.shard.xy;
+	float core = v_in.shard.z;
+	ShardState st = shard_xform(pivot, v_in.shard.w, v_in.rnd.xyz);
+
+	/* the shard turns about its own centre, then travels */
+	float3 local = float3(v_in.pos.xy - pivot, 0.0);
+	float3 world = rotate_axis(local, st.axis, st.angle) + float3(pivot, 0.0) + st.off;
+	float3 normal = rotate_axis(float3(0.0, 0.0, 1.0), st.axis, st.angle);
+
+	/*
+	 * A perspective divide applied before the projection OBS hands us.
+	 *
+	 * The transition renders through an orthographic matrix, which is right
+	 * for a pane sitting in the frame and wrong for a shard sailing past the
+	 * camera. Scaling about the centre of the canvas by focal/(focal - z)
+	 * is that missing divide, and it composes with the ortho rather than
+	 * replacing it, so a shard at z = 0 lands on exactly the pixel it
+	 * started on and the pane at rest is untouched.
+	 */
+	float2 centre = canvas * 0.5;
+	float persp = focal / max(focal - world.z, focal * 0.05);
+	float2 screen = centre + (world.xy - centre) * persp;
+
+	vert_out.pos = mul(float4(screen, 0.0, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+
+	/*
+	 * Towards the centre of the shard, as a unit vector in pixels. It is
+	 * zero at the fan centre, where the polygon corner and the pivot are the
+	 * same point, so interpolating it gives the pixel shader a field that
+	 * points out of the middle of the shard towards whichever edge is
+	 * nearest - which is the direction a thick edge would bend the light.
+	 */
+	float2 inward = pivot - v_in.pos.xy;
+	float inward_len = length(inward);
+
+	vert_out.edge.xy = inward_len > 0.001 ? inward / inward_len : float2(0.0, 0.0);
+	vert_out.edge.z = core;
+
+	/*
+	 * How much glass this shard is showing. It is the crack front folded
+	 * together with the settle, because the pixel shader wants the product
+	 * and never the two apart: zero before the crack arrives, and zero
+	 * again once the shard has become the incoming scene.
+	 */
+	vert_out.edge.w = st.crack * st.settle;
+
+	vert_out.light.xyz = normal;
+	vert_out.light.w = st.alpha;
+
+	vert_out.look.x = max(v_in.rnd.w, 1.0);
+	vert_out.look.y = st.flash;
+	vert_out.look.z = st.reveal;
+	vert_out.look.w = v_in.rnd.x;
+
+	return vert_out;
+}
+
+float4 PSGlass(GlassVertOut v_in) : TARGET
+{
+	float core = saturate(v_in.edge.z);
+	float inner = v_in.look.x;
+	float flash = v_in.look.y;
+
+	/* how far this pixel is from the nearest cut edge, in pixels */
+	float dist = core * inner;
+
+	/*
+	 * How much glass to draw. Nothing below happens while this is zero, and
+	 * it is zero on both the first frame and the last: an unbroken pane has
+	 * no edges to light, nothing to bend the light through and no reason to
+	 * be tinted, and neither has a scene that has finished arriving. That is
+	 * what makes the two frames either side of the transition the two scenes
+	 * exactly, rather than nearly.
+	 */
+	float lit = saturate(v_in.edge.w);
+
+	/* Through the thick of the break the scene pulls towards the middle of
+	 * the shard, hardest right at the edge. */
+	float bend = lit * refract_px * (1.0 - core) * (1.0 - core);
+	float2 uv = v_in.uv + v_in.edge.xy * bend / canvas;
+
+	float4 scene;
+
+	if (style == STYLE_WIPE) {
+		/* nothing moves: the shard changes scene where it stands, and
+		 * the crack lines are all that mark the break out */
+		scene = lerp(a_tex.Sample(textureSampler, uv), b_tex.Sample(textureSampler, uv), v_in.look.z);
+	} else if (use_b) {
+		scene = b_tex.Sample(textureSampler, uv);
+	} else {
+		scene = a_tex.Sample(textureSampler, uv);
+	}
+
+	float3 col = scene.rgb;
+
+	/* a shard caught at a glancing angle catches more light, the way a real
+	 * one does as it turns over */
+	float facing = saturate(abs(v_in.light.z));
+	float glance = 1.0 - facing;
+
+	/* per shard brightness spread, so the break does not read as one image
+	 * cut up but as many pieces of glass */
+	col *= 1.0 + tint_amount * (v_in.look.w - 0.5) * 2.0 * lit;
+
+	/* the lit bevel along every cut edge */
+	float rim = 1.0 - smoothstep(0.0, max(rim_px, 0.5), dist);
+	col += crack_color.rgb * rim * rim_amount * lit * (0.45 + 1.1 * glance);
+
+	/* the crack itself: a hairline that burns as it runs through */
+	float line = 1.0 - smoothstep(0.0, max(crack_px, 0.5), dist);
+	col += crack_color.rgb * line * lit * (0.25 + crack_glow * flash);
+
+	/*
+	 * A highlight sweeping across the pane. It is projected on the shard's
+	 * seated position rather than where it has flown to, so the sweep reads
+	 * as one light crossing a sheet of glass instead of each shard carrying
+	 * its own.
+	 */
+	float along = dot(v_in.uv - 0.5, glint_dir) + 0.5;
+	float band = exp(-40.0 * (along - glint_pos) * (along - glint_pos));
+	col += crack_color.rgb * band * glint_amount * lit * (0.3 + 0.9 * glance);
+
+	return float4(col, scene.a * v_in.light.w);
+}
+
+/* The scene the shards are falling away from, behind the whole mesh. */
+float4 PSBackground(VertData v_in) : TARGET
+{
+	float4 col = b_tex.Sample(textureSampler, v_in.uv);
+
+	return float4(col.rgb * bg_level, col.a);
+}
+
+technique Glass
+{
+	pass
+	{
+		vertex_shader = VSGlass(v_in);
+		pixel_shader  = PSGlass(v_in);
+	}
+}
+
+technique Background
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSBackground(v_in);
+	}
+}

@@ -37,6 +37,10 @@ endif()
 target_sources(
   ${CMAKE_PROJECT_NAME}
   PRIVATE
+    src/glass-mesh.c
+    src/glass-mesh.h
+    src/glass-transition.c
+    src/glass-transition.h
     src/plugin-main.c
     src/tiles-transition.c
     src/tiles-transition.h
@@ -64,6 +68,14 @@ if(ENABLE_TESTS)
     target_link_libraries(test-vortex PRIVATE m)
   endif()
   add_test(NAME test-vortex COMMAND test-vortex)
+
+  # The glass transition builds its shards in C rather than in a shader, so the
+  # test links that code instead of mirroring it.
+  add_executable(test-glass test/test-glass.c src/glass-mesh.c)
+  if(NOT MSVC)
+    target_link_libraries(test-glass PRIVATE m)
+  endif()
+  add_test(NAME test-glass COMMAND test-glass)
 endif()
 
 # Not part of the ctest suite: it needs a graphics device, so it is run by hand
@@ -78,6 +90,20 @@ if(ENABLE_GPU_TESTS)
     target_compile_definitions(gpu-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-opengl.dylib")
   elseif(WIN32)
     target_compile_definitions(gpu-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
+  endif()
+
+  # The glass transition draws a mesh rather than a full screen sprite, so it
+  # needs a check of its own: gpu-check knows how to drive a sprite effect.
+  add_executable(glass-check test/glass-check.c src/glass-mesh.c)
+  target_link_libraries(glass-check PRIVATE OBS::libobs)
+  target_include_directories(glass-check PRIVATE src)
+  if(NOT MSVC)
+    target_link_libraries(glass-check PRIVATE m)
+  endif()
+  if(APPLE)
+    target_compile_definitions(glass-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-opengl.dylib")
+  elseif(WIN32)
+    target_compile_definitions(glass-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
   endif()
 endif()
 
