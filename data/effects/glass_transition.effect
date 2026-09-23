@@ -345,9 +345,10 @@ float4 PSGlass(GlassVertOut v_in) : TARGET
 	float rim = 1.0 - smoothstep(0.0, max(rim_px, 0.5), dist);
 	col += crack_color.rgb * rim * rim_amount * lit * (0.45 + 1.1 * glance);
 
-	/* the crack itself: a hairline that burns as it runs through */
-	float line = 1.0 - smoothstep(0.0, max(crack_px, 0.5), dist);
-	col += crack_color.rgb * line * lit * (0.25 + crack_glow * flash);
+	/* the crack itself: a hairline that burns as it runs through. Not called
+	 * `line` - that is a reserved word in HLSL, and the effect fails to load */
+	float hairline = 1.0 - smoothstep(0.0, max(crack_px, 0.5), dist);
+	col += crack_color.rgb * hairline * lit * (0.25 + crack_glow * flash);
 
 	/*
 	 * A highlight sweeping across the pane. It is projected on the shard's
