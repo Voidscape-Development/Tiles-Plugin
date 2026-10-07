@@ -1,6 +1,6 @@
 # Tiles
 
-Scene transitions for OBS Studio. The module provides three, all generated on
+Scene transitions for OBS Studio. The module provides five, all generated on
 the GPU with no bundled video:
 
 - **Tiling Transition** — the screen is divided into a lattice of shapes that
@@ -9,6 +9,11 @@ the GPU with no bundled video:
   swallows the canvas, and lets the incoming one back in through the smoke.
 - **Glass Transition** — the outgoing scene cracks from a point of impact,
   holds a beat, and the shards fall away to leave the incoming one.
+- **Matte Cutout Transition** — one big shape cuts the outgoing scene away,
+  growing out of a point or closing in on it, with optional border, echo
+  bands and glow riding its edge for a stinger look.
+- **Portal Transition** — a portal is shot open over the outgoing scene with
+  the incoming one showing through it, then grows to swallow the canvas.
 
 ## Installing
 
@@ -225,6 +230,122 @@ shards, no rim light, no tint — and the last frame the incoming scene the same
 way, by the shards having either faded out or landed.
 
 
+# Matte Cutout Transition
+
+A single shape cuts the outgoing scene away to the incoming one: an iris wipe
+in its plainest form, and with the bands behind its edge turned up, a stinger.
+The tiling transition's Keyhole mode does something related with a whole
+lattice of small shapes; this is one shape, which frees it to be one that could
+never tile.
+
+Every cutout is one field over the canvas, saying how far the front has to
+travel before each pixel changes scene. A shape that grows is its own gauge —
+the scale at which its outline passes the pixel — so the polygons come out as
+true pixel distances square to their edges, and the bands trailing the front
+are concentric copies of the shape. A sweep is the distance along the sweep with
+the edge's own profile taken off it. Either way the front only has to run from
+the lowest value on the canvas to the highest, which is found by sampling the
+canvas edge, so an offset centre, a turn, a spin or a stretch never cuts the
+transition short.
+
+## Shapes
+
+| Shape | What it is |
+| --- | --- |
+| **Circle**, **Square**, **Triangle**, **Diamond**, **Hexagon**, **Octagon** | The plain shapes, grown about the centre. |
+| **Star** | Any number of points from 3 to 12, with **Star Depth** setting how far in the inner corners sit. At full depth it is the regular polygon. |
+| **Heart** | A square on its point with a disc on each upper edge. |
+| **Cross (X)** | Two crossed bars. Turn it 45° with **Angle** for a plus. |
+| **Wave – Sine Sweep** | A wavy edge sweeping across the canvas. |
+| **Wave – Curling Crest** | Waves that rise gently and fall away steeply, each with a lip hanging over its face, rolling across the canvas. |
+| **Wave – Radial Ripple** | A circle whose outline ripples as it grows. |
+| **Clock** | A hand sweeping round from twelve o'clock; **Segments** gives it more than one. |
+| **Spiral** | Arms winding out from the centre; **Spiral Turns** sets how many times they wind between the centre and the far corner. |
+| **Blinds** | Bars that open from their middles, across the canvas. |
+| **Zigzag** | A sawtooth edge sweeping across. |
+| **Custom Image – Shape** | Your own image's silhouette, grown like the built-in shapes. Its opaque pixels are the shape, or for an image with no transparency, its bright ones. It is traced as seen from the image's centre, so holes and overhangs are filled in — a shape with a hole grown about its centre would grow the hole too, and never close. |
+| **Custom Image – Luma Wipe** | Your own image laid over the canvas, used as an order: dark areas change scene first, light ones last. |
+
+The three waves and the zigzag have **Wave Height**, **Wavelength** and **Wave
+Drift** — how many wavelengths the edge slides along over the transition, so it
+rolls as it travels.
+
+## Direction and motion
+
+**Inside Out** grows the cutout from the centre with the incoming scene inside
+it. **Outside In** closes the outgoing scene down onto the centre with the
+incoming scene arriving from the edges. For the sweeps, the clock and the luma
+wipe it runs the wipe backwards.
+
+- **Angle** turns the shape; for the sweeps it is the direction of travel, 0°
+  left to right and 90° top to bottom, the same convention as the tiling
+  transition.
+- **Spin** — turns the shape makes over the transition.
+- **Aspect Stretch** — the shape's width over its height. 178% makes a circle a
+  16:9 oval.
+- **Centre X/Y** — where the shape grows from, −50% to 150%.
+- **Easing** — linear, ease in and out, ease out, ease in, or **Overshoot**,
+  which runs past and settles back.
+- **Pause Length** / **Pause Size** — holds the cutout still part way through
+  at a set size: the cartoon iris that stops on a circle before it closes. An
+  overshoot shows best with a pause, which gives it something to settle onto.
+
+## Edge and bands
+
+Behind the front, in order: a **Border** in one colour, then up to four **Echo
+Bands** in their own colours, then the incoming scene. **Edge Softness**
+feathers every one of those edges, and **Glow** lights the front itself. Set
+the border and echoes to 0 for a plain cutout.
+
+The front is run past the field's range at both ends by the feather and the
+glow, so neither leaves anything on the first or last frame.
+
+## Presets
+
+**Iris Out**, **Cartoon Iris**, **Star Stinger**, **Spinning Hexagon**,
+**Heart Pop**, **Rolling Wave**, **Clock Wipe** and **Blinds**, each setting
+the shape, motion and bands together. Editing any of them afterwards puts the
+list back to Custom; the centre and the mask image are left alone.
+
+# Portal Transition
+
+A portal is shot open over the outgoing scene with the incoming one showing
+through it, holds, and grows until it has swallowed the canvas.
+
+1. **Open** — the oval pops open from a point, overshooting slightly and
+   settling. With **Spiral open** on, its inside is a swirl of the portal's
+   energy that clears from the centre outwards to let the incoming scene
+   through.
+2. **Hold** — the portal sits open, its rim burning and throwing sparks.
+3. **Grow** — it grows until the rim is past the furthest corner, sized from
+   wherever the centre is.
+
+Everything hangs off the signed distance from the oval's edge. Outside, the
+outgoing scene ripples under the rim's light; inside, the incoming scene bulges
+as though seen through a lens near the edge; on the edge, the rim is a band of
+light whose width the noise keeps moving, crawling round the oval so it burns
+rather than sitting still.
+
+## Settings
+
+| Setting | What it does |
+| --- | --- |
+| **Preset** | **Blue Portal**, **Orange Portal**, **Quick Shot** or **Slow Reveal**. Editing any setting afterwards puts this back to Custom. |
+| **Portal Colour** | Blue, Orange, or Custom with a colour picker of its own. The hot core of the rim is the colour most of the way to white, the way both stock portals are built. |
+| **Centre X/Y** | Where the portal opens, −50% to 150%. |
+| **Portal Width** / **Portal Size** | The oval's width over its height, and its open height as a share of the canvas height. |
+| **Open** / **Hold** | The phase split, as shares of the transition. The two together stop at 90% so the grow always has time. |
+| **Spiral open** | The swirling energy inside the opening portal. Off shows the incoming scene through it at once. |
+| **Rim Width**, **Glow**, **Glow Reach** | The rim band, the brightness of all the light, and how far it reaches out over the outgoing scene. |
+| **Rim Swirl** | How far the burning pattern crawls round the rim over the transition. |
+| **Sparks** | Sparks thrown off the rim. They die away as the portal grows. |
+| **Distortion** | How far the scenes are bent near the rim, in pixels. 0 leaves both flat. |
+
+Every width scales with the portal while it opens, so a portal a few pixels
+across is not all rim. The first frame has no portal at all, and on the last it
+has grown past the furthest corner by more than anything the edge reaches in, so
+both ends are exactly one scene.
+
 ## Building
 
 Standard OBS plugin template layout. See the
@@ -272,7 +393,21 @@ same way — a single colour comes back exactly as it went in, a mix never inven
 a colour outside the two entries it sits between, and both core sliders land on
 the values the look was tuned at when left at their defaults.
 
-Neither needs OBS or a GPU:
+`test/test-matte.c` and `test/test-portal.c` link `src/matte-math.c` and
+`src/portal-math.c`, which hold the geometry and the clock the plugin builds the
+two transitions' uniforms from. The matte test checks that both ends are exact
+for every shape, both directions, any centre on or off the canvas, turn, spin,
+stretch and band layout; that each shape is what it says — the polygons are 1
+on their own outline, a star at full depth is the polygon; that the grown
+shapes scale about their centres and every field is monotone along rays from
+it, which is what lets the range be found from the canvas edge alone; that the
+clock starts at 0 and finishes at 1 with the pause holding; and that image
+silhouettes trace sensibly, holes filled. The portal test checks that the first
+frame has no portal and the last has every pixel past the shader's early exit to
+the untouched incoming scene, and that the size is continuous across the
+phases, with a pop that overshoots only a little.
+
+None of them needs OBS or a GPU:
 
 ```sh
 cmake -S . -B build -DENABLE_TESTS=ON
@@ -301,6 +436,19 @@ scene all show up here and nowhere else:
 
 ```sh
 xvfb-run -a ./build/glass-check data/effects/glass_transition.effect
+```
+
+`test/matte-check.c` and `test/portal-check.c` render the two newer effects.
+The matte check covers every shape in both directions, plain and as a full
+stinger, and also renders each shape with hard edges mid-transition and
+compares every pixel's scene against `matte_field()` evaluated on the CPU. That
+is what holds the shader's field and its C mirror to each other: the plugin
+finds the front's range with the mirror, so a mirror that drifted would cut the
+transition short.
+
+```sh
+xvfb-run -a ./build/matte-check data/effects/matte_transition.effect
+xvfb-run -a ./build/portal-check data/effects/portal_transition.effect
 ```
 
 ## Licence

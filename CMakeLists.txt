@@ -41,7 +41,15 @@ target_sources(
     src/glass-mesh.h
     src/glass-transition.c
     src/glass-transition.h
+    src/matte-math.c
+    src/matte-math.h
+    src/matte-transition.c
+    src/matte-transition.h
     src/plugin-main.c
+    src/portal-math.c
+    src/portal-math.h
+    src/portal-transition.c
+    src/portal-transition.h
     src/tiles-transition.c
     src/tiles-transition.h
     src/vortex-transition.c
@@ -76,6 +84,22 @@ if(ENABLE_TESTS)
     target_link_libraries(test-glass PRIVATE m)
   endif()
   add_test(NAME test-glass COMMAND test-glass)
+
+  # Like the glass transition, the matte and portal transitions keep the math
+  # their uniforms are built from in plain C, so the tests link it directly.
+  add_executable(test-matte test/test-matte.c src/matte-math.c)
+  target_include_directories(test-matte PRIVATE src)
+  if(NOT MSVC)
+    target_link_libraries(test-matte PRIVATE m)
+  endif()
+  add_test(NAME test-matte COMMAND test-matte)
+
+  add_executable(test-portal test/test-portal.c src/portal-math.c)
+  target_include_directories(test-portal PRIVATE src)
+  if(NOT MSVC)
+    target_link_libraries(test-portal PRIVATE m)
+  endif()
+  add_test(NAME test-portal COMMAND test-portal)
 endif()
 
 # Not part of the ctest suite: it needs a graphics device, so it is run by hand
@@ -105,6 +129,22 @@ if(ENABLE_GPU_TESTS)
   elseif(WIN32)
     target_compile_definitions(glass-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
   endif()
+
+  # Sprite effects like the tiling one, but with uniforms of their own and a
+  # schedule from their own math, so each gets a check of its own.
+  foreach(check IN ITEMS matte portal)
+    add_executable(${check}-check test/${check}-check.c src/${check}-math.c)
+    target_link_libraries(${check}-check PRIVATE OBS::libobs)
+    target_include_directories(${check}-check PRIVATE src)
+    if(NOT MSVC)
+      target_link_libraries(${check}-check PRIVATE m)
+    endif()
+    if(APPLE)
+      target_compile_definitions(${check}-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-opengl.dylib")
+    elseif(WIN32)
+      target_compile_definitions(${check}-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
+    endif()
+  endforeach()
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

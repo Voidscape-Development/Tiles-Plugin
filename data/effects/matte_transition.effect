@@ -1,0 +1,332 @@
+/*
+ * Matte Cutout - a shaped stinger wipe for OBS Studio.
+ *
+ * Every cutout is one scalar field over the canvas: matte_field() says how far
+ * the front has to have travelled before a pixel changes scene. A shape grown
+ * about the origin is the field of its gauge - the scale at which its outline
+ * passes the pixel - and a sweep is the distance along the sweep with the
+ * edge's own profile taken off it. The front is worked out on the CPU, so all
+ * that is left here is
+ *
+ *     d = dir_sign * (front - field)
+ *
+ * the distance the front has passed this pixel. Below zero is the outgoing
+ * scene; then the border, then each echo band, each a fixed width behind the
+ * last; and from band_end on, the incoming scene. Every shape gets the border,
+ * the echoes, the feather and the glow from that one number.
+ *
+ * The front is run past the field's range at both ends by the feather and the
+ * glow, so the first frame is the outgoing scene and the last the incoming one
+ * exactly, for every pixel - see matte_front() in src/matte-math.c.
+ *
+ * NOTE: matte_field() is mirrored in src/matte-math.c, which the plugin uses to
+ * find the field's range over the canvas. Keep the two in sync.
+ */
+
+uniform float4x4 ViewProj;
+uniform texture2d a_tex;
+uniform texture2d b_tex;
+uniform texture2d luma_tex;    /* luma wipe image, stretched over the canvas */
+uniform texture2d profile_tex; /* image silhouette radii, MATTE_PROFILE_SIZE x 1 */
+
+uniform float2 canvas;      /* render target size, pixels */
+uniform float2 origin_px;   /* shape centre, pixels */
+uniform float2 rot;         /* cos, sin of the shape's turn this frame */
+uniform float2 inv_stretch; /* 1 / stretch along the shape's own axes */
+
+uniform int shape;
+uniform float star_n;  /* star points */
+uniform float star_k;  /* star slope, see matte_star_slope() */
+uniform float arms;    /* clock and spiral segments */
+uniform float pitch;   /* clock and spiral field per segment */
+uniform float amp;     /* wave, zigzag and ripple height, px */
+uniform float wavelen; /* wave and zigzag px between crests */
+uniform float lobes;   /* ripples around the circle */
+uniform float bar_px;  /* blinds bar width */
+uniform float phase;   /* edge pattern drift, cycles */
+uniform float luma_scale; /* field units per unit of luma */
+
+uniform float front;    /* where the front is this frame, field units */
+uniform float dir_sign; /* 1 inside out, -1 outside in */
+uniform float feather;  /* edge softness, at least 1 */
+uniform float border;   /* border band width */
+uniform float echo;     /* each echo band's width */
+uniform int echo_count;
+uniform float band_end; /* where the incoming scene starts */
+uniform float glow;     /* glow reach either side of the edge; 0 is off */
+uniform float glow_amt;
+
+uniform float4 color_border;
+uniform float4 color_echo1;
+uniform float4 color_echo2;
+uniform float4 color_echo3;
+uniform float4 color_echo4;
+uniform float4 color_glow;
+
+sampler_state textureSampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+/* the silhouette's radii go round the circle, so its lookup wraps */
+sampler_state profileSampler {
+	Filter   = Linear;
+	AddressU = Wrap;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+#define TAU 6.2831853
+
+#define SHAPE_CIRCLE   0
+#define SHAPE_SQUARE   1
+#define SHAPE_TRIANGLE 2
+#define SHAPE_DIAMOND  3
+#define SHAPE_HEXAGON  4
+#define SHAPE_OCTAGON  5
+#define SHAPE_STAR     6
+#define SHAPE_HEART    7
+#define SHAPE_CROSS    8
+#define SHAPE_WAVE     9
+#define SHAPE_CURL     10
+#define SHAPE_RIPPLE   11
+#define SHAPE_CLOCK    12
+#define SHAPE_SPIRAL   13
+#define SHAPE_BLINDS   14
+#define SHAPE_ZIGZAG   15
+#define SHAPE_IMAGE    16
+#define SHAPE_LUMA     17
+
+/* mirrors of the constants in src/matte-math.c and src/matte-math.h */
+#define CROSS_THICKNESS 0.28
+#define DIAMOND_TALL    1.4
+#define CURL_PEAK       0.7
+#define CURL_LIP_R      0.5
+#define CURL_LIP_O      0.85
+#define CURL_LIP_U      0.35
+#define HEART_DISC      float2(0.5, -0.25)
+#define HEART_DISC_R2   0.5
+
+/* ------------------------------------------------------------------ */
+/* the field                                                          */
+/* ------------------------------------------------------------------ */
+
+float disc_gauge(float2 p, float2 c, float r2)
+{
+	float a = r2 - dot(c, c);
+	float pc = dot(p, c);
+
+	return (-pc + sqrt(pc * pc + a * dot(p, p))) / a;
+}
+
+/*
+ * How far the front has to travel before q changes scene. q is in the shape's
+ * own frame, pixels from the origin. MIRRORED by matte_field() in
+ * src/matte-math.c - every branch here has a twin there.
+ *
+ * The polygons are their own gauges: the largest of the edge normals dotted
+ * with q, with each normal scaled to an inradius of 1, so a unit of field is a
+ * pixel square to every edge. The star, heart and cross are unions or folds of
+ * those, and the rest are distances along a sweep.
+ */
+float matte_field(float2 q)
+{
+	float ax = abs(q.x);
+	float ay = abs(q.y);
+	float r = length(q);
+
+	if (shape == SHAPE_SQUARE)
+		return max(ax, ay);
+
+	if (shape == SHAPE_TRIANGLE)
+		return max(q.y, -0.5 * q.y + 0.8660254 * ax);
+
+	if (shape == SHAPE_DIAMOND)
+		return (DIAMOND_TALL * ax + ay) / 1.7204651;
+
+	if (shape == SHAPE_HEXAGON)
+		return max(ax, 0.5 * ax + 0.8660254 * ay);
+
+	if (shape == SHAPE_OCTAGON)
+		return max(max(ax, ay), (ax + ay) * 0.7071068);
+
+	if (shape == SHAPE_STAR) {
+		float sector = TAU / star_n;
+		float a = atan2(q.x, -q.y);
+
+		a -= sector * floor(a / sector + 0.5);
+		return r * cos(a) + star_k * r * abs(sin(a));
+	}
+
+	if (shape == SHAPE_HEART) {
+		float sq = max((ax + q.y) / 1.25, (ax - q.y) / 0.75);
+
+		return min(sq, disc_gauge(float2(ax, q.y), HEART_DISC, HEART_DISC_R2));
+	}
+
+	if (shape == SHAPE_CROSS) {
+		float u = abs(q.x + q.y) * 0.7071068;
+		float v = abs(q.x - q.y) * 0.7071068;
+
+		return min(max(u, v / CROSS_THICKNESS), max(v, u / CROSS_THICKNESS));
+	}
+
+	if (shape == SHAPE_WAVE)
+		return q.x - amp * sin(TAU * (q.y / wavelen + phase));
+
+	if (shape == SHAPE_CURL) {
+		float x = frac(q.y / wavelen + phase);
+		float s = x < CURL_PEAK ? x / CURL_PEAK : (1.0 - x) / (1.0 - CURL_PEAK);
+		float g = q.x - amp * s * s * (3.0 - 2.0 * s);
+		float lip_r = CURL_LIP_R * amp;
+		float du = (x - CURL_PEAK) * wavelen - CURL_LIP_U * amp;
+
+		if (abs(du) < lip_r)
+			g = min(g, q.x - CURL_LIP_O * amp - sqrt(lip_r * lip_r - du * du));
+		return g;
+	}
+
+	if (shape == SHAPE_RIPPLE) {
+		float ramp = saturate(r / max(2.0 * amp, 0.001));
+
+		return r + amp * ramp * sin(lobes * atan2(q.y, q.x) + TAU * phase);
+	}
+
+	if (shape == SHAPE_CLOCK || shape == SHAPE_SPIRAL) {
+		float turn = frac((atan2(q.y, q.x) / TAU + 0.25) * arms);
+
+		return (shape == SHAPE_SPIRAL ? r : 0.0) + turn * pitch;
+	}
+
+	if (shape == SHAPE_BLINDS)
+		return abs(frac(q.y / bar_px + 0.5) - 0.5) * bar_px;
+
+	if (shape == SHAPE_ZIGZAG)
+		return q.x - amp * (1.0 - 4.0 * abs(frac(q.y / wavelen + phase) - 0.5));
+
+	if (shape == SHAPE_IMAGE) {
+		float u = atan2(q.y, q.x) / TAU;
+		float radius = profile_tex.SampleLevel(profileSampler, float2(u, 0.5), 0.0).r;
+
+		return r / max(radius, 0.001);
+	}
+
+	return r;
+}
+
+float field_at(float2 uv)
+{
+	float2 p;
+	float2 q;
+
+	/* the luma wipe ignores the origin, the turn and the stretch: the image
+	 * is laid over the canvas as it is */
+	if (shape == SHAPE_LUMA) {
+		float4 m = luma_tex.SampleLevel(textureSampler, uv, 0.0);
+
+		return dot(m.rgb, float3(0.2126, 0.7152, 0.0722)) * m.a * luma_scale;
+	}
+
+	p = uv * canvas - origin_px;
+	q = float2(p.x * rot.x + p.y * rot.y, -p.x * rot.y + p.y * rot.x) * inv_stretch;
+
+	return matte_field(q);
+}
+
+/* ------------------------------------------------------------------ */
+/* the bands                                                          */
+/* ------------------------------------------------------------------ */
+
+/* How far past the boundary at edge this pixel is, 0..1, across the feather.
+ * Written out rather than reached through smoothstep(), which no effect in
+ * OBS itself uses. */
+float cross_edge(float d, float edge)
+{
+	float s = saturate((d - edge) / feather + 0.5);
+
+	return s * s * (3.0 - 2.0 * s);
+}
+
+/* The bands between the outgoing scene and the incoming one, laid over col
+ * front to back. The echoes past echo_count are never reached. */
+float3 band_colour(float3 col, float d)
+{
+	float edge = border;
+
+	if (border > 0.0)
+		col = lerp(col, color_border.rgb, cross_edge(d, 0.0));
+
+	if (echo_count > 0)
+		col = lerp(col, color_echo1.rgb, cross_edge(d, edge));
+	if (echo_count > 1)
+		col = lerp(col, color_echo2.rgb, cross_edge(d, edge + echo));
+	if (echo_count > 2)
+		col = lerp(col, color_echo3.rgb, cross_edge(d, edge + 2.0 * echo));
+	if (echo_count > 3)
+		col = lerp(col, color_echo4.rgb, cross_edge(d, edge + 3.0 * echo));
+
+	return col;
+}
+
+float4 PSMatte(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float d = dir_sign * (front - field_at(uv));
+	float leave = cross_edge(d, 0.0);
+	float arrive = cross_edge(d, band_end);
+	float4 col;
+
+	/*
+	 * Each scene is only sampled where it can show. Most of the canvas is
+	 * wholly one or the other on any frame, so most pixels take one fetch.
+	 * SampleLevel, not Sample, so the fetches can sit inside the branches.
+	 */
+	if (leave <= 0.0)
+		col = a_tex.SampleLevel(textureSampler, uv, 0.0);
+	else if (arrive >= 1.0)
+		col = b_tex.SampleLevel(textureSampler, uv, 0.0);
+	else {
+		float4 a = float4(0.0, 0.0, 0.0, 1.0);
+
+		if (leave < 1.0)
+			a = a_tex.SampleLevel(textureSampler, uv, 0.0);
+
+		/* with no bands, band_end is 0 and the incoming scene crosses
+		 * straight over the outgoing one on the same edge */
+		col = float4(band_colour(a.rgb, d), band_end > 0.0 ? lerp(a.a, 1.0, leave) : a.a);
+
+		if (arrive > 0.0)
+			col = lerp(col, b_tex.SampleLevel(textureSampler, uv, 0.0), arrive);
+	}
+
+	/* compact, so the front's padding takes it off the canvas at both ends */
+	if (glow > 0.0) {
+		float g = 1.0 - saturate(abs(d) / glow);
+
+		col.rgb += color_glow.rgb * glow_amt * g * g;
+	}
+
+	return col;
+}
+
+technique Matte
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSMatte(v_in);
+	}
+}
