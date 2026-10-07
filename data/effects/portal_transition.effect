@@ -1,0 +1,296 @@
+/*
+ * Portal - a shot-portal scene transition for OBS Studio.
+ *
+ * An oval portal is shot open over the outgoing scene with the incoming one
+ * showing through it, holds, and then grows until it has swallowed the canvas.
+ * Generated per pixel, like the vortex, so it costs no bundled media and takes
+ * its colour from the settings.
+ *
+ * Everything hangs off one number: d, the signed pixel distance from the
+ * oval's edge, positive outside. Outside is the outgoing scene, rippling
+ * where the rim's light falls on it; inside is the incoming scene, bulged as
+ * though seen through a lens near the edge; and on the edge is the rim, a band
+ * of light whose width the noise keeps moving, so it burns rather than sitting
+ * still.
+ *
+ * While the portal is opening its inside is a swirl of the rim's energy, which
+ * clears from the middle outwards to let the incoming scene through. Sparks
+ * come off the rim from the moment it appears until it has grown off the
+ * canvas.
+ *
+ * The first and last frame are exact by construction: the portal has no size
+ * at all on the first, so every pixel takes the early exit to the outgoing
+ * scene, and on the last it has grown past the furthest corner by more than
+ * every effect reaches in from the edge - see portal_cover_radius() in
+ * src/portal-math.c - so every pixel is the incoming scene, sampled where it
+ * stands.
+ */
+
+uniform float4x4 ViewProj;
+uniform texture2d a_tex;
+uniform texture2d b_tex;
+
+uniform float2 canvas;    /* render target size, pixels */
+uniform float2 centre_px; /* portal centre, pixels */
+uniform float aspect;     /* oval width over height */
+uniform float radius;     /* oval half height this frame, pixels */
+
+uniform float progress;  /* transition time, 0..1 */
+uniform float rim;       /* rim width this frame, pixels */
+uniform float outer;     /* how far the light reaches out over the outgoing scene */
+uniform float distort;   /* how far the scenes are bent near the edge, pixels */
+uniform float energy;    /* 0..1, how much of the inside is still swirling */
+uniform float sparks;    /* spark brightness this frame; 0 is none */
+uniform float spark_reach; /* how far a spark flies from the rim, pixels */
+uniform float swirl;     /* turns the rim's pattern makes over the transition */
+uniform float intensity; /* overall brightness of the light */
+
+uniform float4 color_rim;  /* the portal's colour */
+uniform float4 color_core; /* what the hottest light blows out to */
+
+sampler_state textureSampler {
+	Filter   = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+#define TAU 6.2831853
+
+/* Angular cells around the rim. Integral, so the noise meets itself where the
+ * oval closes. */
+#define FIBRES 48.0
+
+/* mirrors of PORTAL_INNER_RIMS and PORTAL_RIM_SPAN in src/portal-math.h: how
+ * far in from the edge the inner light and the lens reach, and how far the
+ * rim band can, in rim widths */
+#define INNER_RIMS 4.0
+#define RIM_SPAN   2.7
+
+/* Sparks: two rings of cells around the rim, one spark each. */
+#define SPARK_CELLS_A 40.0
+#define SPARK_CELLS_B 64.0
+#define SPARK_SIZE    2.2
+
+/* ------------------------------------------------------------------ */
+/* noise                                                              */
+/* ------------------------------------------------------------------ */
+
+float hash1(float2 p)
+{
+	float3 q = frac(float3(p.x, p.y, p.x) * float3(0.1031, 0.1030, 0.0973) + 7.13);
+	q += dot(q, float3(q.y, q.z, q.x) + 33.33);
+	return frac((q.x + q.y) * q.z);
+}
+
+/* Value noise whose lattice wraps along x with period per. */
+float vnoise_p(float2 p, float per)
+{
+	float2 i = floor(p);
+	float2 f = p - i;
+	float x0 = i.x - per * floor(i.x / per);
+	float x1 = i.x + 1.0 - per * floor((i.x + 1.0) / per);
+	float a, b, c, d;
+
+	f = f * f * (3.0 - 2.0 * f);
+
+	a = hash1(float2(x0, i.y));
+	b = hash1(float2(x1, i.y));
+	c = hash1(float2(x0, i.y + 1.0));
+	d = hash1(float2(x1, i.y + 1.0));
+
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float fbm_p(float2 p, float per)
+{
+	float v = 0.5 * vnoise_p(p, per);
+
+	p *= 2.0;
+	per *= 2.0;
+	v += 0.25 * vnoise_p(p, per);
+
+	p *= 2.0;
+	per *= 2.0;
+	v += 0.125 * vnoise_p(p, per);
+
+	return v / 0.875;
+}
+
+/* ------------------------------------------------------------------ */
+/* pieces                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The burning rim. Two bands of noise around the oval, one slid round each way
+ * by the swirl, so the light crawls along the rim the way it does on a portal
+ * rather than sitting still. Bounded to 0..1, which is what the rim width the
+ * plugin pads the final size by rests on.
+ */
+float rim_noise(float ang)
+{
+	float u = ang / TAU * FIBRES;
+	float slide = swirl * progress * FIBRES;
+	float a = fbm_p(float2(u + slide, progress * 6.0), FIBRES);
+	float b = fbm_p(float2(u - slide * 0.6 + 17.0, progress * 9.0 + 4.0), FIBRES);
+
+	return saturate(a * 0.6 + b * 0.4);
+}
+
+/* One spark: the one that belongs to angular cell c, on its own loop of birth
+ * and flight. u is this pixel's position around the rim in cells. */
+float spark_one(float u, float c, float d, float rho_px, float cells, float seed)
+{
+	float cw = c - cells * floor(c / cells); /* wrapped, for the hash */
+	float h1 = hash1(float2(cw, seed));
+	float h2 = hash1(float2(cw, seed + 3.7));
+	float h3 = hash1(float2(cw, seed + 8.1));
+	float age = frac(progress * (2.0 + 3.0 * h2) + h3);
+	float fly = spark_reach * (0.35 + 0.65 * h1) * age;
+	float du = (u - (c + h1)) / cells * TAU * rho_px;
+	float dr = (d - fly) / (SPARK_SIZE * 4.0);
+	float hit = saturate(1.0 - (du * du) / (SPARK_SIZE * SPARK_SIZE) - dr * dr);
+
+	return hit * (1.0 - age) * (1.0 - age);
+}
+
+/* Sparks thrown out from the rim, one per angular cell, checked for this cell
+ * and its two neighbours. Written out rather than looped: no effect in this
+ * module leans on the effect parser's handling of loops. */
+float spark_ring(float ang, float d, float rho_px, float cells, float seed)
+{
+	float u = frac(ang / TAU) * cells;
+	float cell = floor(u);
+
+	return spark_one(u, cell - 1.0, d, rho_px, cells, seed) + spark_one(u, cell, d, rho_px, cells, seed) +
+	       spark_one(u, cell + 1.0, d, rho_px, cells, seed);
+}
+
+/* The inside while the portal is opening: energy in the rim's colours wound
+ * into a spiral, clearing from the centre outwards as energy falls to 0. */
+float4 swirl_layer(float ang, float rel)
+{
+	float lr = log(max(rel, 0.02));
+	float arm = 0.5 + 0.5 * cos(ang * 3.0 + lr * 5.0 - progress * TAU * 6.0);
+	float edge = 1.0 - energy * 1.15;
+	float mask = saturate((rel - edge) / 0.3 + (arm - 0.5) * 0.9);
+	float3 col = lerp(color_rim.rgb, color_core.rgb, arm * saturate(rel));
+
+	return float4(col * intensity, mask * saturate(energy * 4.0));
+}
+
+float4 PSPortal(VertData v_in) : TARGET
+{
+	float2 uv = v_in.uv;
+	float2 p = uv * canvas - centre_px;
+	float2 q;
+	float rho;
+	float grad;
+	float d;
+	float ang;
+	float2 dir;
+	float n;
+	float4 col;
+
+	/* no portal yet: the outgoing scene, untouched */
+	if (radius <= 0.0)
+		return a_tex.SampleLevel(textureSampler, uv, 0.0);
+
+	q = float2(p.x / aspect, p.y);
+	rho = length(q);
+
+	/* rho's gradient, so d is close to a true pixel distance all the way
+	 * round the oval rather than only at its top and bottom */
+	grad = length(float2(q.x / aspect, q.y)) / max(rho, 0.0001);
+	d = (rho - radius) / max(grad, 0.0001);
+
+	/*
+	 * Well inside, past everything the edge reaches in: the incoming scene,
+	 * as it is. This is most of the canvas once the portal has grown, and the
+	 * whole of it on the last frame.
+	 */
+	if (-d > max(RIM_SPAN * rim + 1.0, INNER_RIMS * rim) + 1.0 && energy <= 0.0)
+		return b_tex.SampleLevel(textureSampler, uv, 0.0);
+
+	ang = atan2(q.y, q.x);
+	dir = p / max(length(p), 0.0001);
+	n = rim_noise(ang);
+
+	if (d > 0.0) {
+		/* Outside: the outgoing scene, rippling under the rim's light.
+		 * The ripple is compact, so far from the portal the scene is
+		 * sampled where it stands. */
+		float reach = max(outer, 1.0);
+		float fall = 1.0 - saturate(d / reach);
+		float2 off = dir * distort * fall * fall * sin(d * 0.15 - progress * 60.0);
+		float glow = fall * fall * (0.35 + 0.65 * n);
+
+		col = a_tex.SampleLevel(textureSampler, uv + off / canvas, 0.0);
+		col.rgb += color_rim.rgb * glow * intensity * 0.9;
+	} else {
+		/* Inside: the incoming scene, pulled in towards the centre near
+		 * the edge like the view through a lens, with the rim's light
+		 * trailing in off it. */
+		float reach = max(INNER_RIMS * rim, 1.0);
+		float fall = 1.0 - saturate(-d / reach);
+		float2 off = -dir * distort * fall * fall;
+		float glow = fall * fall * (0.5 + 0.5 * n);
+
+		col = b_tex.SampleLevel(textureSampler, uv + off / canvas, 0.0);
+		col.rgb += color_rim.rgb * glow * intensity * 0.55;
+
+		if (energy > 0.0) {
+			float4 e = swirl_layer(ang, rho / radius);
+
+			col.rgb = lerp(col.rgb, e.rgb, e.a);
+		}
+	}
+
+	/*
+	 * The rim itself: a band inside the edge whose width the noise keeps
+	 * moving, hard on the outside, soft where it gives way inwards, and hot
+	 * at the outer edge where it blows out towards the core colour.
+	 */
+	{
+		float thick = rim * (0.55 + 0.9 * n);
+		float soft = max(thick * 0.8, 1.0);
+		float outside = saturate(0.5 - d);
+		float inside = 1.0 - saturate((-d - thick) / soft);
+		float cover = outside * inside;
+		float hot = saturate(1.0 + d / max(thick * 0.6, 0.5));
+		float3 rim_col = lerp(color_rim.rgb, color_core.rgb, hot * (0.4 + 0.6 * n));
+
+		col.rgb = lerp(col.rgb, rim_col * intensity, cover * 0.95);
+	}
+
+	/* the sparks, only where one can be */
+	if (sparks > 0.0 && d > -rim && d < spark_reach + SPARK_SIZE * 4.0) {
+		float rho_px = length(p);
+		float s = spark_ring(ang, d, rho_px, SPARK_CELLS_A, 1.3) + spark_ring(ang, d, rho_px, SPARK_CELLS_B, 5.9);
+
+		col.rgb += color_core.rgb * s * sparks;
+	}
+
+	return col;
+}
+
+technique Portal
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSPortal(v_in);
+	}
+}
