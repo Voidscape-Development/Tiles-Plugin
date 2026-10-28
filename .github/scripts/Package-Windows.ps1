@@ -74,27 +74,22 @@ function Package {
     $InstallRoot = "${ProjectRoot}/release/${Configuration}/${ProductName}"
     $PortableRoot = "${ProjectRoot}/release-portable/${Configuration}"
 
-    if ( ! ( Test-Path -Path "${InstallRoot}/bin" ) ) {
-        throw "No packaged binaries found at ${InstallRoot}/bin"
+    if ( ! ( Test-Path -Path "${InstallRoot}/${ProductName}.dll" ) ) {
+        throw "No packaged binary found at ${InstallRoot}/${ProductName}.dll"
     }
 
     if ( Test-Path -Path $PortableRoot ) {
         Remove-Item -Path $PortableRoot -Recurse -Force
     }
 
-    # Portable OBS installations expect plugins in obs-plugins/64bit and their
-    # resources in data/obs-plugins/<plugin name>, so the packaged install tree
-    # is rearranged into that layout before it is archived.
-    $PortableBinaryDir = "${PortableRoot}/obs-plugins"
-    $PortableDataDir = "${PortableRoot}/data/obs-plugins/${ProductName}"
+    # Portable OBS Studio 33+ installations load plugins from
+    # plugins/<plugin name>/<plugin name>.dll with their resources in
+    # plugins/<plugin name>/data, which matches the packaged install tree.
+    $PortablePluginDir = "${PortableRoot}/plugins"
 
-    New-Item -ItemType Directory -Force -Path $PortableBinaryDir, $PortableDataDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $PortablePluginDir | Out-Null
 
-    Copy-Item -Path "${InstallRoot}/bin/*" -Destination $PortableBinaryDir -Recurse -Force
-
-    if ( Test-Path -Path "${InstallRoot}/data" ) {
-        Copy-Item -Path "${InstallRoot}/data/*" -Destination $PortableDataDir -Recurse -Force
-    }
+    Copy-Item -Path $InstallRoot -Destination $PortablePluginDir -Recurse -Force
 
     $CompressArgs = @{
         Path = (Get-ChildItem -Path $PortableRoot)
