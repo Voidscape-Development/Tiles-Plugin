@@ -21,6 +21,19 @@ Grab the build for your platform from the releases page and install it the way
 OBS plugins are normally installed on that platform. Then add the transition in
 OBS under **Scene Transitions → +**.
 
+Builds target OBS Studio 33 and later, and use the plugin layout it introduced:
+
+| Platform | Location |
+| --- | --- |
+| Windows | `C:\ProgramData\obs-studio\plugins\tiles\` (`tiles.dll` plus a `data` folder) |
+| Windows (portable OBS) | `<OBS folder>\plugins\tiles\` |
+| macOS | `~/Library/Application Support/obs-studio/plugins/tiles.plugin` |
+| Linux | `~/.local/share/obs-studio/plugins/tiles/` (`tiles.so` plus a `data` folder) |
+
+The Ubuntu package installs to `/usr/lib/<arch>/obs-modules/plugins` instead.
+Remove any copy left in an older location (such as `bin\64bit` or
+`obs-plugins`) so OBS doesn't flag it as a legacy plugin.
+
 # Tiling Transition
 
 Every shape tiles the plane edge to edge, so when the tiles reach full size

@@ -316,7 +316,7 @@ struct matte_info {
 
 	/* mask image - owned by the graphics thread once loaded */
 	struct dstr image_path;
-	gs_image_file_t image;
+	gs_image_file_ex_t image;
 	bool have_image;
 	bool have_profile;
 	gs_texture_t *profile_tex;
@@ -350,7 +350,7 @@ static const char *matte_get_name(void *type_data)
 
 /* Takes a decoded image's pixels to tightly packed RGBA, whichever of the two
  * byte orders it came in. Returns NULL for anything else. */
-static uint8_t *image_rgba(const gs_image_file_t *img)
+static uint8_t *image_rgba(const gs_image_file_ex_t *img)
 {
 	size_t n = (size_t)img->cx * (size_t)img->cy;
 	uint8_t *out;
@@ -398,7 +398,7 @@ static void luma_range(const uint8_t *rgba, size_t n, float *lo, float *hi)
 
 static void matte_load_image(struct matte_info *matte, const char *path)
 {
-	gs_image_file_t img;
+	gs_image_file_ex_t img;
 	float profile[MATTE_PROFILE_SIZE];
 	bool have_profile = false;
 	float lo = 0.0f, hi = 1.0f;
@@ -408,7 +408,7 @@ static void matte_load_image(struct matte_info *matte, const char *path)
 	memset(&img, 0, sizeof(img));
 
 	if (path && *path) {
-		gs_image_file_init(&img, path);
+		gs_image_file_ex_init(&img, path, GS_IMAGE_ALPHA_STRAIGHT);
 
 		if (!img.loaded)
 			obs_log(LOG_WARNING, "matte: could not load mask image '%s'", path);
@@ -430,7 +430,7 @@ static void matte_load_image(struct matte_info *matte, const char *path)
 	obs_enter_graphics();
 
 	if (img.loaded)
-		gs_image_file_init_texture(&img);
+		gs_image_file_ex_init_texture(&img);
 
 	if (have_profile) {
 		const uint8_t *data = (const uint8_t *)profile;
@@ -438,7 +438,7 @@ static void matte_load_image(struct matte_info *matte, const char *path)
 		profile_tex = gs_texture_create(MATTE_PROFILE_SIZE, 1, GS_R32F, 1, &data, 0);
 	}
 
-	gs_image_file_free(&matte->image);
+	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 
 	matte->image = img;
@@ -621,7 +621,7 @@ static void matte_destroy(void *data)
 
 	obs_enter_graphics();
 	gs_effect_destroy(matte->effect);
-	gs_image_file_free(&matte->image);
+	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 	obs_leave_graphics();
 
