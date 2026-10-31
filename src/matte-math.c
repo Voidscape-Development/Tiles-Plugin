@@ -102,7 +102,8 @@ static float profile_radius(const float *profile, float ang)
 	return profile[i0] + (profile[i1] - profile[i0]) * w;
 }
 
-/* MIRRORED in data/effects/matte_transition.effect: matte_field() */
+/* The twin of matte_field() in data/effects/matte_math.effect, which
+ * test/test-mirrors.cpp holds this to. */
 float matte_field(const struct matte_shape_params *sp, float qx, float qy, float phase)
 {
 	float ax = fabsf(qx);

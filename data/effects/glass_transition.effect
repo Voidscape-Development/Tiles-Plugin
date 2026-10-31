@@ -13,8 +13,9 @@
  *   VSGlass  - places a shard. It evaluates the same motion as
  *              glass_shard_xform() in src/glass-mesh.c, because the CPU has to
  *              know where the shards are to sort them back to front and the GPU
- *              has to know to draw them. That function is the one piece of this
- *              transition that exists twice; both copies say so.
+ *              has to know to draw them. The shader's copy is in
+ *              glass_math.effect, and test/test-mirrors.cpp holds the two
+ *              together.
  *
  *   PSGlass  - lights it. Cracks, rim, refraction, glint and tint all hang off
  *              two interpolated values: how far the pixel is from the shard's
@@ -86,15 +87,7 @@ sampler_state textureSampler {
 	AddressV = Clamp;
 };
 
-#define TAU 6.2831853
-
-#define STYLE_WINDOW   0
-#define STYLE_BLOW     1
-#define STYLE_WIPE     2
-#define STYLE_ASSEMBLE 3
-
-/* mirrors GLASS_CRACK_EDGE in src/glass-mesh.h */
-#define CRACK_EDGE 0.12
+#include "glass_math.effect"
 
 struct VertData {
 	float4 pos : POSITION;
@@ -127,111 +120,6 @@ struct GlassVertOut {
 	float4 light : TEXCOORD2; /* shard normal.xyz, alpha */
 	float4 look  : TEXCOORD3; /* inradius, crack flash, reveal, tint */
 };
-
-struct ShardState {
-	float3 off;
-	float3 axis;
-	float angle;
-	float alpha;
-	float crack;
-	float flash;
-	float reveal;
-	float settle;
-};
-
-/*
- * NOTE: mirrors glass_shard_xform() in src/glass-mesh.c, which places the same
- * shard on the CPU for the depth sort and is what test/test-glass.c holds the
- * motion to. Keep the two in sync.
- */
-ShardState shard_xform(float2 pivot, float launch, float3 rnd)
-{
-	ShardState st;
-	float order = saturate(launch + (rnd.x - launch) * saturate(scatter) * 0.7);
-	float start = hold_end + (1.0 - hold_end) * order * 0.30;
-	float m = saturate((progress - start) / max(1.0 - start, 0.0001));
-	float k;
-	float2 dir;
-	float len;
-	float ang;
-	float spread;
-	float fling;
-	float fall;
-	float turns;
-
-	st.off = float3(0.0, 0.0, 0.0);
-	st.axis = float3(0.0, 0.0, 1.0);
-	st.angle = 0.0;
-	st.alpha = 1.0;
-	st.reveal = 0.0;
-	st.settle = 1.0;
-
-	st.crack = saturate((crack_front - order) / CRACK_EDGE);
-
-	/* brightest as the crack is actually running through the shard, so the
-	 * break travels as a flash rather than lighting up everywhere at once */
-	st.flash = st.crack * (1.0 - st.crack) * 4.0;
-
-	if (style == STYLE_WIPE) {
-		/* the break belongs to the scene it broke, so it goes with it */
-		st.reveal = smoothstep(0.0, 1.0, m);
-		st.settle = 1.0 - st.reveal;
-		return st;
-	}
-
-	k = arriving ? 1.0 - m : m;
-	st.alpha = 1.0 - smoothstep(0.72, 1.0, k);
-
-	/* an arriving shard is glass until it seats itself and the scene
-	 * afterwards; a leaving one has faded out by then */
-	if (arriving)
-		st.settle = smoothstep(0.0, 0.25, k);
-
-	dir = pivot - impact_px;
-	len = length(dir);
-	dir = len > 0.001 ? dir / len : float2(0.0, -1.0);
-
-	ang = (rnd.y - 0.5) * saturate(scatter) * 1.6;
-	dir = float2(dir.x * cos(ang) - dir.y * sin(ang), dir.x * sin(ang) + dir.y * cos(ang));
-
-	/* an impulse outwards and a constant pull: one linear in the flight,
-	 * the other going with its square */
-	spread = 0.55 + rnd.z * 0.9;
-	fling = throw_amt * k * reach * 0.85 * spread;
-	fall = gravity * k * k * reach * 1.25;
-
-	st.off.xy = dir * fling + gravity_dir * fall;
-
-	if (style == STYLE_BLOW)
-		st.off.z = throw_amt * k * reach * 0.55 * (0.35 + rnd.z * 0.9);
-	else
-		st.off.z = k * k * reach * 0.10 * (rnd.z - 0.45);
-
-	if (flat_shards) {
-		st.axis = float3(0.0, 0.0, 1.0);
-		st.off.z = 0.0;
-	} else {
-		float a = rnd.y * TAU;
-		float az = (rnd.z - 0.5) * 1.2;
-
-		st.axis = normalize(float3(cos(a), sin(a), az));
-	}
-
-	turns = spin * (0.35 + rnd.x * 1.3) * (rnd.y < 0.5 ? -1.0 : 1.0);
-	st.angle = turns * TAU * k;
-
-	return st;
-}
-
-/* Rodrigues: turn v about the unit axis k by a. Cheaper than building the
- * matrix when it is used twice per vertex. */
-float3 rotate_axis(float3 v, float3 k, float a)
-{
-	float c = cos(a);
-	float s = sin(a);
-
-	return v * c + cross(k, v) * s + k * dot(k, v) * (1.0 - c);
-}
 
 GlassVertOut VSGlass(GlassVertIn v_in)
 {

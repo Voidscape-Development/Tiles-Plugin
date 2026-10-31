@@ -31,6 +31,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* How far past the canvas the portal finishes, beyond the furthest corner, as
  * a share of the rim width: the rim, the light trailing inside it and the lens
  * bulge all have to be off the canvas on the last frame. */
@@ -67,3 +71,7 @@ struct portal_frame {
 };
 
 void portal_frame_at(const struct portal_params *pp, float cover, float t, struct portal_frame *f);
+
+#ifdef __cplusplus
+}
+#endif

@@ -24,8 +24,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * math lives in their effect files. This one is a mesh:
  * the shards are real triangles built on the CPU, so the code here *is* the
  * implementation rather than a copy of it, and the tests link it directly.
- * Only glass_shard_xform() has a mirror - the vertex shader has to evaluate it
- * per vertex - and that one is marked at both ends.
+ * Only glass_shard_xform() exists twice - the vertex shader has to evaluate it
+ * per vertex too - and test/test-mirrors.cpp compiles the shader's copy from
+ * data/effects/glass_math.effect and holds the two together.
  */
 
 #pragma once
@@ -33,6 +34,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
  * Ceiling on the shard count, whatever shard size is asked for. A 4K canvas
@@ -264,9 +269,10 @@ float glass_crack_front(float progress, float crack_end, int easing);
 /*
  * Where one shard is at glass_motion::progress.
  *
- * NOTE: mirrored by shard_xform() in data/effects/glass_transition.effect,
- * which is what actually moves the vertices. This copy places the shard for the
- * depth sort and is what the tests hold the motion to. Keep the two in sync.
+ * shard_xform() in data/effects/glass_math.effect is its twin, and is what
+ * actually moves the vertices; test/test-mirrors.cpp holds the two together.
+ * This copy places the shard for the
+ * depth sort and is what the tests hold the motion to.
  */
 void glass_shard_xform(const struct glass_motion *motion, const struct glass_shard *shard, struct glass_xform *out);
 
@@ -279,3 +285,7 @@ float glass_shard_depth(const struct glass_motion *motion, const struct glass_sh
  * hold field->count entries; neither needs to be initialised. */
 void glass_sort_order(const struct glass_field *field, const struct glass_motion *motion, uint32_t *order,
 		      struct glass_sortkey *scratch);
+
+#ifdef __cplusplus
+}
+#endif

@@ -89,30 +89,27 @@ if(ENABLE_TESTS)
 
   add_shader_test(test-tiling test/test-tiling.cpp src/tiles-math.c)
   add_shader_test(test-vortex test/test-vortex.cpp src/vortex-math.c)
+  add_shader_test(test-portal test/test-portal.cpp src/portal-math.c)
 
-  # The glass transition builds its shards in C rather than in a shader, so the
-  # test links that code instead of mirroring it.
+  # The matte field and the shard motion are needed on the CPU as well, by the
+  # plugin itself, so they exist in C too; this holds each to its shader.
+  add_shader_test(test-mirrors test/test-mirrors.cpp src/matte-math.c src/glass-mesh.c)
+
+  # The glass transition builds its shards in C rather than in a shader, and
+  # the matte transition its clock and its range, so these tests link that code
+  # directly.
   add_executable(test-glass test/test-glass.c src/glass-mesh.c)
   if(NOT MSVC)
     target_link_libraries(test-glass PRIVATE m)
   endif()
   add_test(NAME test-glass COMMAND test-glass)
 
-  # Like the glass transition, the matte and portal transitions keep the math
-  # their uniforms are built from in plain C, so the tests link it directly.
   add_executable(test-matte test/test-matte.c src/matte-math.c)
   target_include_directories(test-matte PRIVATE src)
   if(NOT MSVC)
     target_link_libraries(test-matte PRIVATE m)
   endif()
   add_test(NAME test-matte COMMAND test-matte)
-
-  add_executable(test-portal test/test-portal.c src/portal-math.c)
-  target_include_directories(test-portal PRIVATE src)
-  if(NOT MSVC)
-    target_link_libraries(test-portal PRIVATE m)
-  endif()
-  add_test(NAME test-portal COMMAND test-portal)
 endif()
 
 # These render on a real graphics device, so they carry the "gpu" label and are

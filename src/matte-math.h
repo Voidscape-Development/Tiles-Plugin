@@ -30,10 +30,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * border, the echoes, the feather and the glow from the same few lines of
  * shader.
  *
- * The shader evaluates the field per pixel in data/effects/matte_transition.effect,
- * and matte_field() below is its mirror, marked at both ends. The plugin uses
- * the mirror to find the range the front has to cover, and the tests use it to
- * check that range really does cover the canvas.
+ * The shader evaluates the field per pixel, from data/effects/matte_math.effect,
+ * and matte_field() below is its twin in C. The plugin uses this one to find
+ * the range the front has to cover, and the tests use it to check that range
+ * really does cover the canvas; test/test-mirrors.cpp holds the two together.
  */
 
 #pragma once
@@ -42,6 +42,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* The shader carries these as integers, so the numbering is part of the
  * contract with the effect file. */
@@ -118,7 +122,8 @@ struct matte_shape_params {
 };
 
 /* The field at q (shape frame, pixels from the origin) with the edge pattern
- * slid along by phase, in cycles. MIRRORED by matte_field() in the effect. */
+ * slid along by phase, in cycles. The twin of matte_field() in
+ * data/effects/matte_math.effect. */
 float matte_field(const struct matte_shape_params *sp, float qx, float qy, float phase);
 
 /* Whether a shape is a sweep: its field is a distance along one axis rather
@@ -251,3 +256,7 @@ static inline float matte_sign(int direction)
  * image is inside, leaving profile untouched.
  */
 bool matte_build_profile(const uint8_t *rgba, uint32_t w, uint32_t h, float *profile);
+
+#ifdef __cplusplus
+}
+#endif

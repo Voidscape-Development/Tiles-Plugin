@@ -73,11 +73,7 @@ VertData VSDefault(VertData v_in)
  * oval closes. */
 #define FIBRES 48.0
 
-/* mirrors of PORTAL_INNER_RIMS and PORTAL_RIM_SPAN in src/portal-math.h: how
- * far in from the edge the inner light and the lens reach, and how far the
- * rim band can, in rim widths */
-#define INNER_RIMS 4.0
-#define RIM_SPAN   2.7
+#include "portal_math.effect"
 
 /* Sparks: two rings of cells around the rim, one spark each. */
 #define SPARK_CELLS_A 40.0
@@ -197,7 +193,6 @@ float4 PSPortal(VertData v_in) : TARGET
 	float2 p = uv * canvas - centre_px;
 	float2 q;
 	float rho;
-	float grad;
 	float d;
 	float ang;
 	float2 dir;
@@ -210,18 +205,14 @@ float4 PSPortal(VertData v_in) : TARGET
 
 	q = float2(p.x / aspect, p.y);
 	rho = length(q);
-
-	/* rho's gradient, so d is close to a true pixel distance all the way
-	 * round the oval rather than only at its top and bottom */
-	grad = length(float2(q.x / aspect, q.y)) / max(rho, 0.0001);
-	d = (rho - radius) / max(grad, 0.0001);
+	d = edge_distance(p);
 
 	/*
 	 * Well inside, past everything the edge reaches in: the incoming scene,
 	 * as it is. This is most of the canvas once the portal has grown, and the
 	 * whole of it on the last frame.
 	 */
-	if (-d > max(RIM_SPAN * rim + 1.0, INNER_RIMS * rim) + 1.0 && energy <= 0.0)
+	if (-d > inside_reach() && energy <= 0.0)
 		return b_tex.SampleLevel(textureSampler, uv, 0.0);
 
 	ang = atan2(q.y, q.x);

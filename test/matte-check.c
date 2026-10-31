@@ -24,9 +24,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * yellow, so a black pixel means a gap or a bad sample. On top of the first and
  * last frame being exactly one scene each, it renders every shape with no bands
  * mid-transition and compares, pixel for pixel, which scene each pixel shows
- * against matte_field() evaluated on the CPU. That is what holds the shader's
- * field and its C mirror in src/matte-math.c to each other: the plugin finds
- * the front's range with the mirror, so a mirror that drifted would cut the
+ * against matte_field() evaluated on the CPU. test/test-mirrors.cpp holds the
+ * shader's field and its C twin in src/matte-math.c together on the CPU; this
+ * does it once more on a real device, through the shader compiler: the plugin
+ * finds the front's range with the C twin, so one that drifted would cut the
  * transition short or leave it starting late.
  *
  * Needs a graphics device, so ctest runs it under the "gpu" label. Build with
@@ -238,7 +239,7 @@ static void draw(const struct config *c, float t, float *front_out)
  * way - that is the anti-aliasing band, and float precision on the two sides
  * differs - but anywhere else the two must agree.
  */
-static void compare_with_mirror(const struct config *c, float t, const char *ctx)
+static void compare_with_cpu_field(const struct config *c, float t, const char *ctx)
 {
 	struct matte_frame f;
 	struct matte_shape_params sp;
@@ -395,8 +396,8 @@ int main(int argc, char **argv)
 
 				/* the luma wipe's field is a texture, not matte_field() */
 				if (k == 0 && shape != MATTE_SHAPE_LUMA) {
-					compare_with_mirror(&cfg[k], 0.3f, ctx);
-					compare_with_mirror(&cfg[k], 0.6f, ctx);
+					compare_with_cpu_field(&cfg[k], 0.3f, ctx);
+					compare_with_cpu_field(&cfg[k], 0.6f, ctx);
 				}
 			}
 

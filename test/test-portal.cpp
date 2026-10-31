@@ -32,16 +32,30 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  *      at all with the spiral turned off
  *   5. the sparks are gone by the last frame and every envelope stays in 0..1
  *
- * The distance below mirrors PSPortal() in data/effects/portal_transition.effect,
- * which the GPU check in test/portal-check.c renders for real.
+ * The distance from the oval's edge and the reach the early exit trusts are not
+ * restated here: this file compiles data/effects/portal_math.effect, which
+ * PSPortal() uses, through test/hlsl.hpp. The GPU check in test/portal-check.c
+ * renders the effect for real.
  */
 
 #include <math.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdio.h>
 
+#include "hlsl.hpp"
 #include "portal-math.h"
+
+namespace effect {
+using namespace hlsl;
+
+/* The uniforms portal_math.effect reads, set below the way the plugin sets
+ * them. */
+float aspect;
+float radius;
+float rim;
+
+#include "portal_math.effect"
+} // namespace effect
 
 static int failures = 0;
 static int checks = 0;
@@ -62,22 +76,20 @@ static void check(bool ok, const char *fmt, ...)
 	fputc('\n', stderr);
 }
 
-/* mirror of the signed edge distance in PSPortal() */
-static float edge_distance(float px, float py, float aspect, float radius)
+/* The shader's distance from the edge of an oval of this radius, for the pixel
+ * at x/y from its centre. */
+static float edge_distance(float x, float y, float radius)
 {
-	float qx = px / aspect, qy = py;
-	float rho = sqrtf(qx * qx + qy * qy);
-	float gx = qx / aspect, gy = qy;
-	float grad = sqrtf(gx * gx + gy * gy) / fmaxf(rho, 0.0001f);
-
-	return (rho - radius) / fmaxf(grad, 0.0001f);
+	effect::radius = radius;
+	return effect::edge_distance(hlsl::float2(x, y));
 }
 
-/* mirror of the early exit in PSPortal(): past this far inside, nothing the
- * edge draws reaches */
-static float inside_reach(float rim)
+/* The constants the shader keeps for itself. They are #defines, so they are
+ * in scope here unqualified. */
+static void check_constants(void)
 {
-	return fmaxf(PORTAL_RIM_SPAN * rim + 1.0f, PORTAL_INNER_RIMS * rim) + 1.0f;
+	check(INNER_RIMS == PORTAL_INNER_RIMS, "the effect's INNER_RIMS is not PORTAL_INNER_RIMS");
+	check(RIM_SPAN == PORTAL_RIM_SPAN, "the effect's RIM_SPAN is not PORTAL_RIM_SPAN");
 }
 
 static void check_ends(void)
@@ -103,6 +115,10 @@ static void check_ends(void)
 					portal_frame_at(&pp, cover, 0.0f, &f0);
 					portal_frame_at(&pp, cover, 1.0f, &f1);
 
+					/* as portal_callback() sets them for the last frame */
+					effect::aspect = pp.aspect;
+					effect::rim = pp.rim_px * f1.size_k;
+
 					check(f0.radius == 0.0f && f0.energy == 0.0f && f0.spark_env == 0.0f,
 					      "origin %zu aspect %zu rim %zu size %zu: something shows on the first frame",
 					      o, a, r, s);
@@ -114,22 +130,22 @@ static void check_ends(void)
 					/* every pixel well inside the oval on the last frame */
 					for (y = 0; y < (int)cy; y += (y == 0 || y >= (int)cy - 8) ? 1 : 8)
 						for (x = 0; x < (int)cx; x += (y == 0 || y >= (int)cy - 8) ? 1 : 8) {
-							float d = edge_distance(x + 0.5f - ox, y + 0.5f - oy, pp.aspect,
-										f1.radius);
+							float d =
+								edge_distance(x + 0.5f - ox, y + 0.5f - oy, f1.radius);
 
 							worst = fmaxf(worst, d);
 						}
 					for (y = 0; y < (int)cy; y++) {
-						worst = fmaxf(worst, edge_distance(0.5f - ox, y + 0.5f - oy, pp.aspect,
-										   f1.radius));
-						worst = fmaxf(worst, edge_distance(cx - 0.5f - ox, y + 0.5f - oy,
-										   pp.aspect, f1.radius));
+						worst = fmaxf(worst,
+							      edge_distance(0.5f - ox, y + 0.5f - oy, f1.radius));
+						worst = fmaxf(worst,
+							      edge_distance(cx - 0.5f - ox, y + 0.5f - oy, f1.radius));
 					}
 
-					check(-worst > inside_reach(pp.rim_px * f1.size_k),
+					check(-worst > effect::inside_reach(),
 					      "origin %zu aspect %zu rim %zu size %zu: a pixel is only %.2f inside the "
 					      "portal on the last frame (needs %.2f)",
-					      o, a, r, s, -worst, inside_reach(pp.rim_px));
+					      o, a, r, s, -worst, effect::inside_reach());
 				}
 }
 
@@ -144,7 +160,7 @@ static void check_schedule(void)
 				struct portal_params pp = {0.62f, 200.0f,     opens[i], opens[i] + holds[j],
 							   14.0f, spiral != 0};
 				float cover = 1500.0f;
-				struct portal_frame f, prev = {0};
+				struct portal_frame f, prev = {};
 				float peak = 0.0f;
 				int k;
 
@@ -198,6 +214,7 @@ static void check_schedule(void)
 
 int main(void)
 {
+	check_constants();
 	check_ends();
 	check_schedule();
 

@@ -20,8 +20,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * The glass transition's geometry and motion, checked without a graphics
  * device.
  *
- * Unlike test-tiling.c and test-vortex.c, this does not mirror a shader: the
+ * Unlike the tiling and vortex tests, this does not compile a shader: the
  * shards are built in C by src/glass-mesh.c, so the test links the real thing.
+ * The one piece the shader repeats, the shard motion, is held to it by
+ * test/test-mirrors.cpp.
  * What it holds that code to is the pair of properties the transition rests on:
  *
  *   1. the shards are an exact partition of the canvas - every pixel belongs to

@@ -42,7 +42,7 @@ namespace hlsl {
 
 template<int N> struct vec;
 
-/* A read-only view of some of a vector's components, as another vector. */
+/* Some of a vector's components, read as another vector or written from one. */
 template<int N, int... I> struct swizzle {
 	float d[N];
 
@@ -51,6 +51,15 @@ template<int N, int... I> struct swizzle {
 	swizzle &operator*=(float s)
 	{
 		((d[I] *= s), ...);
+		return *this;
+	}
+
+	/* writes through to the components it names */
+	swizzle &operator=(const vec<sizeof...(I)> &o)
+	{
+		int k = 0;
+
+		((d[I] = o.v[k++]), ...);
 		return *this;
 	}
 };

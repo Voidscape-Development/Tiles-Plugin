@@ -1,0 +1,151 @@
+/*
+ * Matte cutout - the field behind matte_transition.effect, which includes this
+ * file.
+ *
+ * Kept apart from the effect so that the tests can compile this same file as
+ * C++ (see test/hlsl.hpp) and hold the plugin's C copy of the field to it. It
+ * reads the effect's uniforms but declares none of them. The one texture it
+ * needs, the image silhouette, it reads through profile_radius(), which
+ * whoever includes it provides.
+ */
+
+#define TAU 6.2831853
+
+#define SHAPE_CIRCLE   0
+#define SHAPE_SQUARE   1
+#define SHAPE_TRIANGLE 2
+#define SHAPE_DIAMOND  3
+#define SHAPE_HEXAGON  4
+#define SHAPE_OCTAGON  5
+#define SHAPE_STAR     6
+#define SHAPE_HEART    7
+#define SHAPE_CROSS    8
+#define SHAPE_WAVE     9
+#define SHAPE_CURL     10
+#define SHAPE_RIPPLE   11
+#define SHAPE_CLOCK    12
+#define SHAPE_SPIRAL   13
+#define SHAPE_BLINDS   14
+#define SHAPE_ZIGZAG   15
+#define SHAPE_IMAGE    16
+#define SHAPE_LUMA     17
+
+/* the same constants as src/matte-math.c and src/matte-math.h, which
+ * test/test-mirrors.cpp holds to these */
+#define CROSS_THICKNESS 0.28
+#define DIAMOND_TALL    1.4
+#define CURL_PEAK       0.7
+#define CURL_LIP_R      0.5
+#define CURL_LIP_O      0.85
+#define CURL_LIP_U      0.35
+#define HEART_DISC      float2(0.5, -0.25)
+#define HEART_DISC_R2   0.5
+
+/* ------------------------------------------------------------------ */
+/* the field                                                          */
+/* ------------------------------------------------------------------ */
+
+float disc_gauge(float2 p, float2 c, float r2)
+{
+	float a = r2 - dot(c, c);
+	float pc = dot(p, c);
+
+	return (-pc + sqrt(pc * pc + a * dot(p, p))) / a;
+}
+
+/*
+ * How far the front has to travel before q changes scene. q is in the shape's
+ * own frame, pixels from the origin. The plugin needs the same field on the
+ * CPU, to find the range the front has to cover, so matte_field() in
+ * src/matte-math.c is its twin; test/test-mirrors.cpp compiles this one too
+ * and holds the two together.
+ *
+ * The polygons are their own gauges: the largest of the edge normals dotted
+ * with q, with each normal scaled to an inradius of 1, so a unit of field is a
+ * pixel square to every edge. The star, heart and cross are unions or folds of
+ * those, and the rest are distances along a sweep.
+ */
+float matte_field(float2 q)
+{
+	float ax = abs(q.x);
+	float ay = abs(q.y);
+	float r = length(q);
+
+	if (shape == SHAPE_SQUARE)
+		return max(ax, ay);
+
+	if (shape == SHAPE_TRIANGLE)
+		return max(q.y, -0.5 * q.y + 0.8660254 * ax);
+
+	if (shape == SHAPE_DIAMOND)
+		return (DIAMOND_TALL * ax + ay) / 1.7204651;
+
+	if (shape == SHAPE_HEXAGON)
+		return max(ax, 0.5 * ax + 0.8660254 * ay);
+
+	if (shape == SHAPE_OCTAGON)
+		return max(max(ax, ay), (ax + ay) * 0.7071068);
+
+	if (shape == SHAPE_STAR) {
+		float sector = TAU / star_n;
+		float a = atan2(q.x, -q.y);
+
+		a -= sector * floor(a / sector + 0.5);
+		return r * cos(a) + star_k * r * abs(sin(a));
+	}
+
+	if (shape == SHAPE_HEART) {
+		float sq = max((ax + q.y) / 1.25, (ax - q.y) / 0.75);
+
+		return min(sq, disc_gauge(float2(ax, q.y), HEART_DISC, HEART_DISC_R2));
+	}
+
+	if (shape == SHAPE_CROSS) {
+		float u = abs(q.x + q.y) * 0.7071068;
+		float v = abs(q.x - q.y) * 0.7071068;
+
+		return min(max(u, v / CROSS_THICKNESS), max(v, u / CROSS_THICKNESS));
+	}
+
+	if (shape == SHAPE_WAVE)
+		return q.x - amp * sin(TAU * (q.y / wavelen + phase));
+
+	if (shape == SHAPE_CURL) {
+		float x = frac(q.y / wavelen + phase);
+		float s = x < CURL_PEAK ? x / CURL_PEAK : (1.0 - x) / (1.0 - CURL_PEAK);
+		float g = q.x - amp * s * s * (3.0 - 2.0 * s);
+		float lip_r = CURL_LIP_R * amp;
+		float du = (x - CURL_PEAK) * wavelen - CURL_LIP_U * amp;
+
+		if (abs(du) < lip_r)
+			g = min(g, q.x - CURL_LIP_O * amp - sqrt(lip_r * lip_r - du * du));
+		return g;
+	}
+
+	if (shape == SHAPE_RIPPLE) {
+		float ramp = saturate(r / max(2.0 * amp, 0.001));
+
+		return r + amp * ramp * sin(lobes * atan2(q.y, q.x) + TAU * phase);
+	}
+
+	if (shape == SHAPE_CLOCK || shape == SHAPE_SPIRAL) {
+		float turn = frac((atan2(q.y, q.x) / TAU + 0.25) * arms);
+
+		return (shape == SHAPE_SPIRAL ? r : 0.0) + turn * pitch;
+	}
+
+	if (shape == SHAPE_BLINDS)
+		return abs(frac(q.y / bar_px + 0.5) - 0.5) * bar_px;
+
+	if (shape == SHAPE_ZIGZAG)
+		return q.x - amp * (1.0 - 4.0 * abs(frac(q.y / wavelen + phase) - 0.5));
+
+	if (shape == SHAPE_IMAGE) {
+		float u = atan2(q.y, q.x) / TAU;
+		float radius = profile_radius(u);
+
+		return r / max(radius, 0.001);
+	}
+
+	return r;
+}
