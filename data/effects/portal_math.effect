@@ -1,0 +1,40 @@
+/*
+ * Portal - the oval's edge behind portal_transition.effect, which includes
+ * this file.
+ *
+ * Kept apart from the effect so that test/test-portal.cpp can compile this
+ * same file as C++ (see test/hlsl.hpp) and check that the last frame really is
+ * past the shader's early exit everywhere, with the shader's own distance. It
+ * reads the effect's uniforms but declares none of them, and samples no
+ * textures.
+ */
+
+/* How far in from the edge the inner light and the lens reach, and how far
+ * the rim band can, in rim widths. The same as PORTAL_INNER_RIMS and
+ * PORTAL_RIM_SPAN in src/portal-math.h, which test/test-portal.cpp holds to
+ * these. */
+#define INNER_RIMS 4.0
+#define RIM_SPAN   2.7
+
+/*
+ * Signed distance in pixels from the oval's edge to p, which is in pixels from
+ * its centre: positive outside. The oval is the curve rho = radius, where
+ * rho = |(x / aspect, y)|; dividing by rho's gradient makes this close to a
+ * true pixel distance all the way round rather than only at the top and
+ * bottom.
+ */
+float edge_distance(float2 p)
+{
+	float2 q = float2(p.x / aspect, p.y);
+	float rho = length(q);
+	float grad = length(float2(q.x / aspect, q.y)) / max(rho, 0.0001);
+
+	return (rho - radius) / max(grad, 0.0001);
+}
+
+/* How far inside the edge anything it draws reaches: the rim band, the inner
+ * light and the lens. Past this a pixel is the incoming scene untouched. */
+float inside_reach()
+{
+	return max(RIM_SPAN * rim + 1.0, INNER_RIMS * rim) + 1.0;
+}

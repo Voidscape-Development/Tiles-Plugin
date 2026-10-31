@@ -37,16 +37,20 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include <graphics/image-file.h>
 #include <util/dstr.h>
+#include <util/task.h>
+#include <util/threading.h>
 
 #include <math.h>
 #include <string.h>
 
 #include "matte-math.h"
 #include "matte-transition.h"
+#include "presets.h"
+#include "transition-common.h"
 
 /* clang-format off */
 
-#define S_PRESET       "preset"
+#define S_PRESET       PRESET_KEY
 #define S_SHAPE        "shape"
 #define S_DIRECTION    "direction"
 #define S_STAR_POINTS  "star_points"
@@ -109,52 +113,91 @@ static const char *const echo_label[MATTE_ECHOES] = {
 	"Matte.EchoColor4",
 };
 
-static const char *const echo_param[MATTE_ECHOES] = {
-	"color_echo1",
-	"color_echo2",
-	"color_echo3",
-	"color_echo4",
-};
-
+/* Preset ids are saved in scene collections, so they are permanent. */
 enum matte_preset_id {
-	MATTE_PRESET_CUSTOM = 0,
+	MATTE_PRESET_IRIS_OUT = 1,
+	MATTE_PRESET_CARTOON = 2,
+	MATTE_PRESET_STAR = 3,
+	MATTE_PRESET_HEXAGON = 4,
+	MATTE_PRESET_HEART = 5,
+	MATTE_PRESET_WAVE = 6,
+	MATTE_PRESET_CLOCK = 7,
+	MATTE_PRESET_BLINDS = 8,
 };
 
 /*
  * A whole look in one row, the way the glass transition does it: picking a
- * preset writes every one of these, and touching any of them afterwards puts
- * the list back to Custom. The centre and the image are left alone - they are
- * where and what, not how.
+ * preset writes every column, and touching any of them afterwards puts the list
+ * back to Custom. The centre and the image are left alone - they are where and
+ * what, not how.
+ *
+ * The columns are named, and the rows below set them by name, because there
+ * are too many for a row of bare numbers to stay readable.
  */
-struct matte_preset {
-	const char *label;
-	int shape;
-	int direction;
-	double star_points;
-	double star_depth;
-	double arms;
-	double turns;
-	double bars;
-	double wave_height;
-	double wave_length;
-	double wave_drift;
-	double lobes;
-	double angle;
-	double spin;
-	double stretch;
-	int easing;
-	double overshoot;
-	double pause_size;
-	double pause_len;
-	double feather;
-	double border;
-	uint32_t border_color;
-	int echo_count;
-	double echo_width;
-	uint32_t echo_color[MATTE_ECHOES];
-	double glow;
-	double glow_width;
-	uint32_t glow_color;
+enum matte_column {
+	MC_SHAPE,
+	MC_DIRECTION,
+	MC_STAR_POINTS,
+	MC_STAR_DEPTH,
+	MC_ARMS,
+	MC_TURNS,
+	MC_BARS,
+	MC_WAVE_HEIGHT,
+	MC_WAVE_LENGTH,
+	MC_WAVE_DRIFT,
+	MC_LOBES,
+	MC_ANGLE,
+	MC_SPIN,
+	MC_STRETCH,
+	MC_EASING,
+	MC_OVERSHOOT,
+	MC_PAUSE_SIZE,
+	MC_PAUSE_LEN,
+	MC_FEATHER,
+	MC_BORDER,
+	MC_BORDER_COLOR,
+	MC_ECHO_COUNT,
+	MC_ECHO_WIDTH,
+	MC_ECHO_COLOR1,
+	MC_ECHO_COLOR2,
+	MC_ECHO_COLOR3,
+	MC_ECHO_COLOR4,
+	MC_GLOW,
+	MC_GLOW_WIDTH,
+	MC_GLOW_COLOR,
+};
+
+static const struct preset_column matte_columns[] = {
+	[MC_SHAPE] = {S_SHAPE, PRESET_INT},
+	[MC_DIRECTION] = {S_DIRECTION, PRESET_INT},
+	[MC_STAR_POINTS] = {S_STAR_POINTS, PRESET_INT},
+	[MC_STAR_DEPTH] = {S_STAR_DEPTH, PRESET_DOUBLE},
+	[MC_ARMS] = {S_ARMS, PRESET_INT},
+	[MC_TURNS] = {S_TURNS, PRESET_DOUBLE},
+	[MC_BARS] = {S_BARS, PRESET_INT},
+	[MC_WAVE_HEIGHT] = {S_WAVE_HEIGHT, PRESET_DOUBLE},
+	[MC_WAVE_LENGTH] = {S_WAVE_LENGTH, PRESET_DOUBLE},
+	[MC_WAVE_DRIFT] = {S_WAVE_DRIFT, PRESET_DOUBLE},
+	[MC_LOBES] = {S_LOBES, PRESET_INT},
+	[MC_ANGLE] = {S_ANGLE, PRESET_DOUBLE},
+	[MC_SPIN] = {S_SPIN, PRESET_DOUBLE},
+	[MC_STRETCH] = {S_STRETCH, PRESET_DOUBLE},
+	[MC_EASING] = {S_EASING, PRESET_INT},
+	[MC_OVERSHOOT] = {S_OVERSHOOT, PRESET_DOUBLE},
+	[MC_PAUSE_SIZE] = {S_PAUSE_SIZE, PRESET_DOUBLE},
+	[MC_PAUSE_LEN] = {S_PAUSE_LEN, PRESET_DOUBLE},
+	[MC_FEATHER] = {S_FEATHER, PRESET_DOUBLE},
+	[MC_BORDER] = {S_BORDER, PRESET_DOUBLE},
+	[MC_BORDER_COLOR] = {S_BORDER_COLOR, PRESET_COLOR},
+	[MC_ECHO_COUNT] = {S_ECHO_COUNT, PRESET_INT},
+	[MC_ECHO_WIDTH] = {S_ECHO_WIDTH, PRESET_DOUBLE},
+	[MC_ECHO_COLOR1] = {S_ECHO_COLOR1, PRESET_COLOR},
+	[MC_ECHO_COLOR2] = {S_ECHO_COLOR2, PRESET_COLOR},
+	[MC_ECHO_COLOR3] = {S_ECHO_COLOR3, PRESET_COLOR},
+	[MC_ECHO_COLOR4] = {S_ECHO_COLOR4, PRESET_COLOR},
+	[MC_GLOW] = {S_GLOW, PRESET_DOUBLE},
+	[MC_GLOW_WIDTH] = {S_GLOW_WIDTH, PRESET_DOUBLE},
+	[MC_GLOW_COLOR] = {S_GLOW_COLOR, PRESET_COLOR},
 };
 
 #define WHITE RGB_(0xFF, 0xFF, 0xFF)
@@ -166,96 +209,149 @@ struct matte_preset {
 
 /* clang-format off */
 
-static const struct matte_preset matte_presets[] = {
+static const struct preset matte_presets[] = {
 	{
-		.label = "Matte.Preset.IrisOut", .shape = MATTE_SHAPE_CIRCLE, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 1,
-		.border = 0, .border_color = WHITE,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_IRIS_OUT,
+		.label = "Matte.Preset.IrisOut",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_CIRCLE, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 1,
+			[MC_BORDER] = 0, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Cartoon", .shape = MATTE_SHAPE_CIRCLE, .direction = MATTE_DIR_IN,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_OVERSHOOT, .overshoot = 60,
-		.pause_size = 22, .pause_len = 30, .feather = 1,
-		.border = 8, .border_color = BLACK,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_CARTOON,
+		.label = "Matte.Preset.Cartoon",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_CIRCLE, [MC_DIRECTION] = MATTE_DIR_IN,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_OVERSHOOT, [MC_OVERSHOOT] = 60,
+			[MC_PAUSE_SIZE] = 22, [MC_PAUSE_LEN] = 30, [MC_FEATHER] = 1,
+			[MC_BORDER] = 8, [MC_BORDER_COLOR] = BLACK,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Star", .shape = MATTE_SHAPE_STAR, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0.35, .stretch = 100, .easing = MATTE_EASE_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 2,
-		.border = 14, .border_color = WHITE,
-		.echo_count = 2, .echo_width = 70, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_STAR,
+		.label = "Matte.Preset.Star",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_STAR, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0.35, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 2,
+			[MC_BORDER] = 14, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 2, [MC_ECHO_WIDTH] = 70,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Hexagon", .shape = MATTE_SHAPE_HEXAGON, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 1.0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 2,
-		.border = 0, .border_color = WHITE,
-		.echo_count = 3, .echo_width = 50, .echo_color = {PINK, AMBER, CYAN, PURPLE},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_HEXAGON,
+		.label = "Matte.Preset.Hexagon",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_HEXAGON, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 1.0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 2,
+			[MC_BORDER] = 0, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 3, [MC_ECHO_WIDTH] = 50,
+			[MC_ECHO_COLOR1] = PINK, [MC_ECHO_COLOR2] = AMBER, [MC_ECHO_COLOR3] = CYAN, [MC_ECHO_COLOR4] = PURPLE,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Heart", .shape = MATTE_SHAPE_HEART, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_OVERSHOOT, .overshoot = 80,
-		.pause_size = 30, .pause_len = 25, .feather = 2,
-		.border = 10, .border_color = WHITE,
-		.echo_count = 1, .echo_width = 30, .echo_color = {RGB_(0xFF, 0x4D, 0x88), PURPLE, PINK, AMBER},
-		.glow = 60, .glow_width = 50, .glow_color = RGB_(0xFF, 0x9E, 0xC4),
+		.id = MATTE_PRESET_HEART,
+		.label = "Matte.Preset.Heart",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_HEART, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_OVERSHOOT, [MC_OVERSHOOT] = 80,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 25, [MC_FEATHER] = 2,
+			[MC_BORDER] = 10, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 1, [MC_ECHO_WIDTH] = 30,
+			[MC_ECHO_COLOR1] = RGB_(0xFF, 0x4D, 0x88), [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 60, [MC_GLOW_WIDTH] = 50, [MC_GLOW_COLOR] = RGB_(0xFF, 0x9E, 0xC4),
+		},
 	},
 	{
-		.label = "Matte.Preset.Wave", .shape = MATTE_SHAPE_WAVE, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.5, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 2,
-		.border = 18, .border_color = RGB_(0xE8, 0xFB, 0xFF),
-		.echo_count = 2, .echo_width = 45, .echo_color = {RGB_(0x29, 0xB6, 0xF6), RGB_(0x0D, 0x47, 0xA1), PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_WAVE,
+		.label = "Matte.Preset.Wave",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_WAVE, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.5, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 2,
+			[MC_BORDER] = 18, [MC_BORDER_COLOR] = RGB_(0xE8, 0xFB, 0xFF),
+			[MC_ECHO_COUNT] = 2, [MC_ECHO_WIDTH] = 45,
+			[MC_ECHO_COLOR1] = RGB_(0x29, 0xB6, 0xF6), [MC_ECHO_COLOR2] = RGB_(0x0D, 0x47, 0xA1), [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Clock", .shape = MATTE_SHAPE_CLOCK, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_LINEAR, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 1,
-		.border = 8, .border_color = WHITE,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 80, .glow_width = 30, .glow_color = CYAN,
+		.id = MATTE_PRESET_CLOCK,
+		.label = "Matte.Preset.Clock",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_CLOCK, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_LINEAR, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 1,
+			[MC_BORDER] = 8, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 80, [MC_GLOW_WIDTH] = 30, [MC_GLOW_COLOR] = CYAN,
+		},
 	},
 	{
-		.label = "Matte.Preset.Blinds", .shape = MATTE_SHAPE_BLINDS, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 1,
-		.border = 6, .border_color = WHITE,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_BLINDS,
+		.label = "Matte.Preset.Blinds",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_BLINDS, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 1,
+			[MC_BORDER] = 6, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 };
 
 /* clang-format on */
 
-#define MATTE_PRESET_COUNT ((int)(sizeof(matte_presets) / sizeof(matte_presets[0])))
+static const struct preset_set matte_preset_set = {
+	.columns = matte_columns,
+	.column_count = TC_COUNT(matte_columns),
+	.presets = matte_presets,
+	.count = TC_COUNT(matte_presets),
+	.custom_label = "Matte.Preset.Custom",
+};
 
 struct matte_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -310,11 +406,11 @@ struct matte_info {
 	struct matte_bands bands;
 	float glow_amt;
 
-	struct vec4 border_color, border_color_srgb;
-	struct vec4 echo_color[MATTE_ECHOES], echo_color_srgb[MATTE_ECHOES];
-	struct vec4 glow_color, glow_color_srgb;
+	struct tc_color border_color;
+	struct tc_color echo_color[MATTE_ECHOES];
+	struct tc_color glow_color;
 
-	/* mask image - owned by the graphics thread once loaded */
+	/* mask image - owned by the graphics thread once adopted */
 	struct dstr image_path;
 	gs_image_file_ex_t image;
 	bool have_image;
@@ -323,20 +419,23 @@ struct matte_info {
 	float profile[MATTE_PROFILE_SIZE];
 	float luma_lo, luma_hi;
 
+	/*
+	 * Mask images are decoded on a thread of their own, because settings
+	 * changes reach a transition on the graphics thread, and decoding a large
+	 * image there would drop frames. Each request bumps the generation; a
+	 * decode that finishes for an older one is thrown away. A finished one
+	 * waits in mask_ready until the next frame adopts it.
+	 */
+	os_task_queue_t *loader;
+	volatile long load_generation;
+	pthread_mutex_t mask_mutex;
+	struct matte_mask *mask_ready;
+
 	/* the field's range, cached against the canvas and the settings */
 	bool range_valid;
 	uint32_t range_cx, range_cy;
 	float range_lo, range_hi;
 };
-
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
 
 static const char *matte_get_name(void *type_data)
 {
@@ -396,44 +495,73 @@ static void luma_range(const uint8_t *rgba, size_t n, float *lo, float *hi)
 	}
 }
 
-static void matte_load_image(struct matte_info *matte, const char *path)
-{
-	gs_image_file_ex_t img;
+/* A decoded mask image and everything worked out from it: all the render
+ * needs from the file except its textures, which only the graphics thread can
+ * make. */
+struct matte_mask {
+	gs_image_file_ex_t image;
+	bool have_profile;
 	float profile[MATTE_PROFILE_SIZE];
-	bool have_profile = false;
-	float lo = 0.0f, hi = 1.0f;
-	gs_texture_t *profile_tex = NULL;
+	float luma_lo, luma_hi;
+};
+
+/* Decodes and measures an image. Touches no graphics state, so it can run on
+ * any thread. An empty path gives an empty mask, which is no image. */
+static struct matte_mask *matte_decode_mask(const char *path)
+{
+	struct matte_mask *mask = bzalloc(sizeof(*mask));
 	uint8_t *rgba;
 
-	memset(&img, 0, sizeof(img));
+	mask->luma_lo = 0.0f;
+	mask->luma_hi = 1.0f;
 
 	if (path && *path) {
-		gs_image_file_ex_init(&img, path, GS_IMAGE_ALPHA_STRAIGHT);
+		gs_image_file_ex_init(&mask->image, path, GS_IMAGE_ALPHA_STRAIGHT);
 
-		if (!img.loaded)
+		if (!mask->image.loaded)
 			obs_log(LOG_WARNING, "matte: could not load mask image '%s'", path);
 	}
 
-	rgba = img.loaded ? image_rgba(&img) : NULL;
+	rgba = mask->image.loaded ? image_rgba(&mask->image) : NULL;
 	if (rgba) {
-		have_profile = matte_build_profile(rgba, img.cx, img.cy, profile);
-		luma_range(rgba, (size_t)img.cx * (size_t)img.cy, &lo, &hi);
+		mask->have_profile = matte_build_profile(rgba, mask->image.cx, mask->image.cy, mask->profile);
+		luma_range(rgba, (size_t)mask->image.cx * (size_t)mask->image.cy, &mask->luma_lo, &mask->luma_hi);
 		bfree(rgba);
 
-		if (!have_profile)
+		if (!mask->have_profile)
 			obs_log(LOG_WARNING, "matte: mask image '%s' has nothing in it to cut a shape from", path);
 	}
 
-	/* Everything the render callback reads is swapped under the graphics
-	 * lock, so a frame never sees half of an old image and half of a new
-	 * one, and the old textures are never freed out from under a draw. */
+	return mask;
+}
+
+/* Frees a mask that was never adopted. Takes the graphics context itself, as
+ * freeing a decoded image goes through the texture it may have. */
+static void matte_mask_free(struct matte_mask *mask)
+{
+	if (!mask)
+		return;
+
 	obs_enter_graphics();
+	gs_image_file_ex_free(&mask->image);
+	obs_leave_graphics();
+	bfree(mask);
+}
 
-	if (img.loaded)
-		gs_image_file_ex_init_texture(&img);
+/*
+ * Makes a decoded mask the one the render reads, creating its textures and
+ * freeing the old ones. Graphics context required, which is also what keeps a
+ * frame from seeing half of an old image and half of a new one.
+ */
+static void matte_adopt_mask(struct matte_info *matte, struct matte_mask *mask)
+{
+	gs_texture_t *profile_tex = NULL;
 
-	if (have_profile) {
-		const uint8_t *data = (const uint8_t *)profile;
+	if (mask->image.loaded)
+		gs_image_file_ex_init_texture(&mask->image);
+
+	if (mask->have_profile) {
+		const uint8_t *data = (const uint8_t *)mask->profile;
 
 		profile_tex = gs_texture_create(MATTE_PROFILE_SIZE, 1, GS_R32F, 1, &data, 0);
 	}
@@ -441,30 +569,102 @@ static void matte_load_image(struct matte_info *matte, const char *path)
 	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 
-	matte->image = img;
-	matte->have_image = img.loaded && img.texture != NULL;
+	matte->image = mask->image;
+	matte->have_image = mask->image.loaded && mask->image.texture != NULL;
 	matte->profile_tex = profile_tex;
-	matte->have_profile = have_profile && profile_tex != NULL;
-	if (have_profile)
-		memcpy(matte->profile, profile, sizeof(profile));
-	matte->luma_lo = lo;
-	matte->luma_hi = fmaxf(hi, lo + 0.001f);
+	matte->have_profile = mask->have_profile && profile_tex != NULL;
+	if (mask->have_profile)
+		memcpy(matte->profile, mask->profile, sizeof(matte->profile));
+	matte->luma_lo = mask->luma_lo;
+	matte->luma_hi = fmaxf(mask->luma_hi, mask->luma_lo + 0.001f);
 	matte->range_valid = false;
 
-	obs_leave_graphics();
+	/* the image itself has moved into matte->image */
+	bfree(mask);
+}
+
+/* Adopts a mask the loader has finished, if there is one. Graphics context
+ * required. */
+static void matte_take_mask(struct matte_info *matte)
+{
+	struct matte_mask *mask;
+
+	pthread_mutex_lock(&matte->mask_mutex);
+	mask = matte->mask_ready;
+	matte->mask_ready = NULL;
+	pthread_mutex_unlock(&matte->mask_mutex);
+
+	if (mask)
+		matte_adopt_mask(matte, mask);
+}
+
+struct matte_load_job {
+	struct matte_info *matte;
+	char *path;
+	long generation;
+};
+
+static void matte_load_task(void *param)
+{
+	struct matte_load_job *job = param;
+	struct matte_info *matte = job->matte;
+	struct matte_mask *mask = NULL;
+	struct matte_mask *stale = NULL;
+
+	/* superseded before it started, so not worth decoding */
+	if (os_atomic_load_long(&matte->load_generation) == job->generation)
+		mask = matte_decode_mask(job->path);
+
+	if (mask) {
+		pthread_mutex_lock(&matte->mask_mutex);
+		if (os_atomic_load_long(&matte->load_generation) == job->generation) {
+			stale = matte->mask_ready;
+			matte->mask_ready = mask;
+			mask = NULL;
+		}
+		pthread_mutex_unlock(&matte->mask_mutex);
+	}
+
+	matte_mask_free(mask);
+	matte_mask_free(stale);
+	bfree(job->path);
+	bfree(job);
+}
+
+/*
+ * Starts loading the image at path, replacing whatever is loading already.
+ *
+ * Before the loader exists - inside create, which is not on the graphics
+ * thread - the image is loaded there and then instead, so a transition is
+ * never first shown with its image missing.
+ */
+static void matte_request_mask(struct matte_info *matte, const char *path)
+{
+	struct matte_load_job *job;
+
+	if (!matte->loader) {
+		struct matte_mask *mask = matte_decode_mask(path);
+
+		obs_enter_graphics();
+		matte_adopt_mask(matte, mask);
+		obs_leave_graphics();
+		return;
+	}
+
+	job = bzalloc(sizeof(*job));
+	job->matte = matte;
+	job->path = bstrdup(path);
+	job->generation = os_atomic_inc_long(&matte->load_generation);
+
+	if (!os_task_queue_queue_task(matte->loader, matte_load_task, job)) {
+		bfree(job->path);
+		bfree(job);
+	}
 }
 
 /* ------------------------------------------------------------------ */
 /* settings                                                           */
 /* ------------------------------------------------------------------ */
-
-static void color_pair(obs_data_t *settings, const char *name, struct vec4 *plain, struct vec4 *srgb)
-{
-	uint32_t color = (uint32_t)obs_data_get_int(settings, name) | 0xFF000000;
-
-	vec4_from_rgba(plain, color);
-	vec4_from_rgba_srgb(srgb, color);
-}
 
 static void matte_update(void *data, obs_data_t *settings)
 {
@@ -526,10 +726,10 @@ static void matte_update(void *data, obs_data_t *settings)
 	matte->bands.glow = matte->glow_amt > 0.0f ? fmaxf((float)obs_data_get_double(settings, S_GLOW_WIDTH), 1.0f)
 						   : 0.0f;
 
-	color_pair(settings, S_BORDER_COLOR, &matte->border_color, &matte->border_color_srgb);
-	color_pair(settings, S_GLOW_COLOR, &matte->glow_color, &matte->glow_color_srgb);
+	tc_color_from_setting(&matte->border_color, settings, S_BORDER_COLOR);
+	tc_color_from_setting(&matte->glow_color, settings, S_GLOW_COLOR);
 	for (i = 0; i < MATTE_ECHOES; i++)
-		color_pair(settings, echo_setting[i], &matte->echo_color[i], &matte->echo_color_srgb[i]);
+		tc_color_from_setting(&matte->echo_color[i], settings, echo_setting[i]);
 
 	matte->range_valid = false;
 
@@ -541,76 +741,73 @@ static void matte_update(void *data, obs_data_t *settings)
 	/* an emptied dstr holds NULL rather than "", and that is still no image */
 	if (strcmp(matte->image_path.array ? matte->image_path.array : "", path) != 0) {
 		dstr_copy(&matte->image_path, path);
-		matte_load_image(matte, path);
+		matte_request_mask(matte, path);
 	}
 }
 
+/* clang-format off */
+
+static const struct tc_param matte_params[] = {
+	TC_PARAM(struct matte_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct matte_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct matte_info, ep_luma_tex, "luma_tex"),
+	TC_PARAM(struct matte_info, ep_profile_tex, "profile_tex"),
+	TC_PARAM(struct matte_info, ep_canvas, "canvas"),
+	TC_PARAM(struct matte_info, ep_origin_px, "origin_px"),
+	TC_PARAM(struct matte_info, ep_rot, "rot"),
+	TC_PARAM(struct matte_info, ep_inv_stretch, "inv_stretch"),
+	TC_PARAM(struct matte_info, ep_shape, "shape"),
+	TC_PARAM(struct matte_info, ep_star_n, "star_n"),
+	TC_PARAM(struct matte_info, ep_star_k, "star_k"),
+	TC_PARAM(struct matte_info, ep_arms, "arms"),
+	TC_PARAM(struct matte_info, ep_pitch, "pitch"),
+	TC_PARAM(struct matte_info, ep_amp, "amp"),
+	TC_PARAM(struct matte_info, ep_wavelen, "wavelen"),
+	TC_PARAM(struct matte_info, ep_lobes, "lobes"),
+	TC_PARAM(struct matte_info, ep_bar_px, "bar_px"),
+	TC_PARAM(struct matte_info, ep_phase, "phase"),
+	TC_PARAM(struct matte_info, ep_luma_scale, "luma_scale"),
+	TC_PARAM(struct matte_info, ep_front, "front"),
+	TC_PARAM(struct matte_info, ep_dir_sign, "dir_sign"),
+	TC_PARAM(struct matte_info, ep_feather, "feather"),
+	TC_PARAM(struct matte_info, ep_border, "border"),
+	TC_PARAM(struct matte_info, ep_echo, "echo"),
+	TC_PARAM(struct matte_info, ep_echo_count, "echo_count"),
+	TC_PARAM(struct matte_info, ep_band_end, "band_end"),
+	TC_PARAM(struct matte_info, ep_glow, "glow"),
+	TC_PARAM(struct matte_info, ep_glow_amt, "glow_amt"),
+	TC_PARAM(struct matte_info, ep_color_border, "color_border"),
+	TC_PARAM(struct matte_info, ep_color_glow, "color_glow"),
+	TC_PARAM(struct matte_info, ep_color_echo[0], "color_echo1"),
+	TC_PARAM(struct matte_info, ep_color_echo[1], "color_echo2"),
+	TC_PARAM(struct matte_info, ep_color_echo[2], "color_echo3"),
+	TC_PARAM(struct matte_info, ep_color_echo[3], "color_echo4"),
+};
+
+/* clang-format on */
+
 static void *matte_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct matte_info *matte;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/matte_transition.effect");
-	int i;
+	struct matte_info *matte = bzalloc(sizeof(struct matte_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/matte_transition.effect is missing");
+	if (!tc_base_init(&matte->base, source, "matte_transition.effect", matte_params, TC_COUNT(matte_params))) {
+		bfree(matte);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/matte_transition.effect");
-		return NULL;
-	}
-
-	matte = bzalloc(sizeof(struct matte_info));
-	matte->source = source;
-	matte->effect = effect;
-
-	matte->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	matte->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	matte->ep_luma_tex = gs_effect_get_param_by_name(effect, "luma_tex");
-	matte->ep_profile_tex = gs_effect_get_param_by_name(effect, "profile_tex");
-	matte->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	matte->ep_origin_px = gs_effect_get_param_by_name(effect, "origin_px");
-	matte->ep_rot = gs_effect_get_param_by_name(effect, "rot");
-	matte->ep_inv_stretch = gs_effect_get_param_by_name(effect, "inv_stretch");
-	matte->ep_shape = gs_effect_get_param_by_name(effect, "shape");
-	matte->ep_star_n = gs_effect_get_param_by_name(effect, "star_n");
-	matte->ep_star_k = gs_effect_get_param_by_name(effect, "star_k");
-	matte->ep_arms = gs_effect_get_param_by_name(effect, "arms");
-	matte->ep_pitch = gs_effect_get_param_by_name(effect, "pitch");
-	matte->ep_amp = gs_effect_get_param_by_name(effect, "amp");
-	matte->ep_wavelen = gs_effect_get_param_by_name(effect, "wavelen");
-	matte->ep_lobes = gs_effect_get_param_by_name(effect, "lobes");
-	matte->ep_bar_px = gs_effect_get_param_by_name(effect, "bar_px");
-	matte->ep_phase = gs_effect_get_param_by_name(effect, "phase");
-	matte->ep_luma_scale = gs_effect_get_param_by_name(effect, "luma_scale");
-	matte->ep_front = gs_effect_get_param_by_name(effect, "front");
-	matte->ep_dir_sign = gs_effect_get_param_by_name(effect, "dir_sign");
-	matte->ep_feather = gs_effect_get_param_by_name(effect, "feather");
-	matte->ep_border = gs_effect_get_param_by_name(effect, "border");
-	matte->ep_echo = gs_effect_get_param_by_name(effect, "echo");
-	matte->ep_echo_count = gs_effect_get_param_by_name(effect, "echo_count");
-	matte->ep_band_end = gs_effect_get_param_by_name(effect, "band_end");
-	matte->ep_glow = gs_effect_get_param_by_name(effect, "glow");
-	matte->ep_glow_amt = gs_effect_get_param_by_name(effect, "glow_amt");
-	matte->ep_color_border = gs_effect_get_param_by_name(effect, "color_border");
-	matte->ep_color_glow = gs_effect_get_param_by_name(effect, "color_glow");
-
-	for (i = 0; i < MATTE_ECHOES; i++)
-		matte->ep_color_echo[i] = gs_effect_get_param_by_name(effect, echo_param[i]);
 
 	dstr_init(&matte->image_path);
+	pthread_mutex_init_value(&matte->mask_mutex);
+	if (pthread_mutex_init(&matte->mask_mutex, NULL) != 0) {
+		tc_base_free(&matte->base);
+		bfree(matte);
+		return NULL;
+	}
 
 	/* Applied directly, as the other transitions do: the source's data
-	 * pointer is only assigned once create returns. */
+	 * pointer is only assigned once create returns. The loader is started
+	 * after, so the first image is loaded here rather than handed off. */
 	matte_update(matte, settings);
+	matte->loader = os_task_queue_create();
 
 	return matte;
 }
@@ -619,12 +816,18 @@ static void matte_destroy(void *data)
 {
 	struct matte_info *matte = data;
 
+	/* Runs any load still queued to completion first, so nothing is left
+	 * to write into the struct once it is gone. */
+	os_task_queue_destroy(matte->loader);
+	matte_mask_free(matte->mask_ready);
+
 	obs_enter_graphics();
-	gs_effect_destroy(matte->effect);
 	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 	obs_leave_graphics();
 
+	pthread_mutex_destroy(&matte->mask_mutex);
+	tc_base_free(&matte->base);
 	dstr_free(&matte->image_path);
 	bfree(matte);
 }
@@ -635,125 +838,12 @@ static void matte_destroy(void *data)
 
 static void matte_defaults(obs_data_t *settings)
 {
-	const struct matte_preset *p = &matte_presets[0];
-	int i;
+	/* the first preset is the default look */
+	preset_set_defaults(&matte_preset_set, &matte_presets[0], settings);
 
-	obs_data_set_default_int(settings, S_PRESET, 1);
-	obs_data_set_default_int(settings, S_SHAPE, p->shape);
-	obs_data_set_default_int(settings, S_DIRECTION, p->direction);
-	obs_data_set_default_int(settings, S_STAR_POINTS, (long long)p->star_points);
-	obs_data_set_default_double(settings, S_STAR_DEPTH, p->star_depth);
-	obs_data_set_default_int(settings, S_ARMS, (long long)p->arms);
-	obs_data_set_default_double(settings, S_TURNS, p->turns);
-	obs_data_set_default_int(settings, S_BARS, (long long)p->bars);
-	obs_data_set_default_double(settings, S_WAVE_HEIGHT, p->wave_height);
-	obs_data_set_default_double(settings, S_WAVE_LENGTH, p->wave_length);
-	obs_data_set_default_double(settings, S_WAVE_DRIFT, p->wave_drift);
-	obs_data_set_default_int(settings, S_LOBES, (long long)p->lobes);
 	obs_data_set_default_string(settings, S_IMAGE, "");
-	obs_data_set_default_double(settings, S_ANGLE, p->angle);
-	obs_data_set_default_double(settings, S_SPIN, p->spin);
-	obs_data_set_default_double(settings, S_STRETCH, p->stretch);
 	obs_data_set_default_double(settings, S_ORIGIN_X, 50.0);
 	obs_data_set_default_double(settings, S_ORIGIN_Y, 50.0);
-	obs_data_set_default_int(settings, S_EASING, p->easing);
-	obs_data_set_default_double(settings, S_OVERSHOOT, p->overshoot);
-	obs_data_set_default_double(settings, S_PAUSE_SIZE, p->pause_size);
-	obs_data_set_default_double(settings, S_PAUSE_LEN, p->pause_len);
-	obs_data_set_default_double(settings, S_FEATHER, p->feather);
-	obs_data_set_default_double(settings, S_BORDER, p->border);
-	obs_data_set_default_int(settings, S_BORDER_COLOR, p->border_color);
-	obs_data_set_default_int(settings, S_ECHO_COUNT, p->echo_count);
-	obs_data_set_default_double(settings, S_ECHO_WIDTH, p->echo_width);
-	for (i = 0; i < MATTE_ECHOES; i++)
-		obs_data_set_default_int(settings, echo_setting[i], p->echo_color[i]);
-	obs_data_set_default_double(settings, S_GLOW, p->glow);
-	obs_data_set_default_double(settings, S_GLOW_WIDTH, p->glow_width);
-	obs_data_set_default_int(settings, S_GLOW_COLOR, p->glow_color);
-}
-
-static bool near_enough(double a, double b)
-{
-	return fabs(a - b) < 0.001;
-}
-
-static bool same_color(obs_data_t *s, const char *name, uint32_t c)
-{
-	return ((uint32_t)obs_data_get_int(s, name) & 0xFFFFFF) == (c & 0xFFFFFF);
-}
-
-static bool preset_matches(const struct matte_preset *p, obs_data_t *s)
-{
-	int i;
-
-	if ((int)obs_data_get_int(s, S_SHAPE) != p->shape || (int)obs_data_get_int(s, S_DIRECTION) != p->direction ||
-	    (int)obs_data_get_int(s, S_EASING) != p->easing || (int)obs_data_get_int(s, S_ECHO_COUNT) != p->echo_count)
-		return false;
-
-	if (!near_enough((double)obs_data_get_int(s, S_STAR_POINTS), p->star_points) ||
-	    !near_enough(obs_data_get_double(s, S_STAR_DEPTH), p->star_depth) ||
-	    !near_enough((double)obs_data_get_int(s, S_ARMS), p->arms) ||
-	    !near_enough(obs_data_get_double(s, S_TURNS), p->turns) ||
-	    !near_enough((double)obs_data_get_int(s, S_BARS), p->bars) ||
-	    !near_enough(obs_data_get_double(s, S_WAVE_HEIGHT), p->wave_height) ||
-	    !near_enough(obs_data_get_double(s, S_WAVE_LENGTH), p->wave_length) ||
-	    !near_enough(obs_data_get_double(s, S_WAVE_DRIFT), p->wave_drift) ||
-	    !near_enough((double)obs_data_get_int(s, S_LOBES), p->lobes) ||
-	    !near_enough(obs_data_get_double(s, S_ANGLE), p->angle) ||
-	    !near_enough(obs_data_get_double(s, S_SPIN), p->spin) ||
-	    !near_enough(obs_data_get_double(s, S_STRETCH), p->stretch) ||
-	    !near_enough(obs_data_get_double(s, S_OVERSHOOT), p->overshoot) ||
-	    !near_enough(obs_data_get_double(s, S_PAUSE_SIZE), p->pause_size) ||
-	    !near_enough(obs_data_get_double(s, S_PAUSE_LEN), p->pause_len) ||
-	    !near_enough(obs_data_get_double(s, S_FEATHER), p->feather) ||
-	    !near_enough(obs_data_get_double(s, S_BORDER), p->border) ||
-	    !near_enough(obs_data_get_double(s, S_ECHO_WIDTH), p->echo_width) ||
-	    !near_enough(obs_data_get_double(s, S_GLOW), p->glow) ||
-	    !near_enough(obs_data_get_double(s, S_GLOW_WIDTH), p->glow_width))
-		return false;
-
-	if (!same_color(s, S_BORDER_COLOR, p->border_color) || !same_color(s, S_GLOW_COLOR, p->glow_color))
-		return false;
-
-	for (i = 0; i < MATTE_ECHOES; i++)
-		if (!same_color(s, echo_setting[i], p->echo_color[i]))
-			return false;
-
-	return true;
-}
-
-static void preset_apply(const struct matte_preset *p, obs_data_t *s)
-{
-	int i;
-
-	obs_data_set_int(s, S_SHAPE, p->shape);
-	obs_data_set_int(s, S_DIRECTION, p->direction);
-	obs_data_set_int(s, S_STAR_POINTS, (long long)p->star_points);
-	obs_data_set_double(s, S_STAR_DEPTH, p->star_depth);
-	obs_data_set_int(s, S_ARMS, (long long)p->arms);
-	obs_data_set_double(s, S_TURNS, p->turns);
-	obs_data_set_int(s, S_BARS, (long long)p->bars);
-	obs_data_set_double(s, S_WAVE_HEIGHT, p->wave_height);
-	obs_data_set_double(s, S_WAVE_LENGTH, p->wave_length);
-	obs_data_set_double(s, S_WAVE_DRIFT, p->wave_drift);
-	obs_data_set_int(s, S_LOBES, (long long)p->lobes);
-	obs_data_set_double(s, S_ANGLE, p->angle);
-	obs_data_set_double(s, S_SPIN, p->spin);
-	obs_data_set_double(s, S_STRETCH, p->stretch);
-	obs_data_set_int(s, S_EASING, p->easing);
-	obs_data_set_double(s, S_OVERSHOOT, p->overshoot);
-	obs_data_set_double(s, S_PAUSE_SIZE, p->pause_size);
-	obs_data_set_double(s, S_PAUSE_LEN, p->pause_len);
-	obs_data_set_double(s, S_FEATHER, p->feather);
-	obs_data_set_double(s, S_BORDER, p->border);
-	obs_data_set_int(s, S_BORDER_COLOR, p->border_color);
-	obs_data_set_int(s, S_ECHO_COUNT, p->echo_count);
-	obs_data_set_double(s, S_ECHO_WIDTH, p->echo_width);
-	for (i = 0; i < MATTE_ECHOES; i++)
-		obs_data_set_int(s, echo_setting[i], p->echo_color[i]);
-	obs_data_set_double(s, S_GLOW, p->glow);
-	obs_data_set_double(s, S_GLOW_WIDTH, p->glow_width);
-	obs_data_set_int(s, S_GLOW_COLOR, p->glow_color);
 }
 
 /* ------------------------------------------------------------------ */
@@ -805,12 +895,9 @@ static void matte_layout(obs_properties_t *props, obs_data_t *settings)
 
 static bool matte_preset_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= MATTE_PRESET_COUNT)
-		preset_apply(&matte_presets[id - 1], settings);
+	preset_selected(&matte_preset_set, settings);
 
 	matte_layout(props, settings);
 	return true;
@@ -821,12 +908,9 @@ static bool matte_preset_modified(obs_properties_t *props, obs_property_t *prop,
  * left it. */
 static bool matte_touched(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= MATTE_PRESET_COUNT && !preset_matches(&matte_presets[id - 1], settings))
-		obs_data_set_int(settings, S_PRESET, MATTE_PRESET_CUSTOM);
+	preset_touched(&matte_preset_set, settings);
 
 	matte_layout(props, settings);
 	return true;
@@ -859,9 +943,7 @@ static obs_properties_t *matte_properties(void *data)
 	UNUSED_PARAMETER(data);
 
 	p = obs_properties_add_list(props, S_PRESET, T_("Matte.Preset"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(p, T_("Matte.Preset.Custom"), MATTE_PRESET_CUSTOM);
-	for (i = 0; i < MATTE_PRESET_COUNT; i++)
-		obs_property_list_add_int(p, T_(matte_presets[i].label), i + 1);
+	preset_fill_list(&matte_preset_set, p);
 	obs_property_set_long_description(p, T_("Matte.Preset.Description"));
 	obs_property_set_modified_callback(p, matte_preset_modified);
 
@@ -1044,7 +1126,7 @@ static void matte_frame_for(const struct matte_info *matte, int shape, float cx,
 static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t, uint32_t cx, uint32_t cy)
 {
 	struct matte_info *matte = data;
-	int shape = matte_effective_shape(matte);
+	int shape;
 	struct matte_shape_params sp;
 	struct matte_frame frame;
 	struct vec2 canvas, origin, rot, inv_stretch;
@@ -1052,9 +1134,12 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	float luma_scale = MATTE_LUMA_SPAN * fcy;
 	float u, front, angle;
 
-	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
+	struct tc_frame blend;
 	int i;
+
+	/* a mask image the loader has finished since the last frame */
+	matte_take_mask(matte);
+	shape = matte_effective_shape(matte);
 
 	matte_frame_for(matte, shape, fcx, fcy, &frame);
 	matte_shape_params(matte, shape, &frame, fcx, fcy, &sp);
@@ -1082,23 +1167,13 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	vec2_set(&rot, cosf(angle), sinf(angle));
 	vec2_set(&inv_stretch, 1.0f / frame.stretch_x, 1.0f / frame.stretch_y);
 
-	gs_enable_framebuffer_srgb(!nonlinear);
-
-	if (nonlinear) {
-		gs_effect_set_texture(matte->ep_a_tex, a);
-		gs_effect_set_texture(matte->ep_b_tex, b);
-		gs_effect_set_vec4(matte->ep_color_border, &matte->border_color);
-		gs_effect_set_vec4(matte->ep_color_glow, &matte->glow_color);
-		for (i = 0; i < MATTE_ECHOES; i++)
-			gs_effect_set_vec4(matte->ep_color_echo[i], &matte->echo_color[i]);
-	} else {
-		gs_effect_set_texture_srgb(matte->ep_a_tex, a);
-		gs_effect_set_texture_srgb(matte->ep_b_tex, b);
-		gs_effect_set_vec4(matte->ep_color_border, &matte->border_color_srgb);
-		gs_effect_set_vec4(matte->ep_color_glow, &matte->glow_color_srgb);
-		for (i = 0; i < MATTE_ECHOES; i++)
-			gs_effect_set_vec4(matte->ep_color_echo[i], &matte->echo_color_srgb[i]);
-	}
+	tc_frame_begin(&blend);
+	tc_set_texture(&blend, matte->ep_a_tex, a);
+	tc_set_texture(&blend, matte->ep_b_tex, b);
+	tc_set_color(&blend, matte->ep_color_border, &matte->border_color);
+	tc_set_color(&blend, matte->ep_color_glow, &matte->glow_color);
+	for (i = 0; i < MATTE_ECHOES; i++)
+		tc_set_color(&blend, matte->ep_color_echo[i], &matte->echo_color[i]);
 
 	/* the mask is an ordering, not a picture, so it is read as stored */
 	gs_effect_set_texture(matte->ep_luma_tex, matte->have_image ? matte->image.texture : NULL);
@@ -1131,10 +1206,10 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	gs_effect_set_float(matte->ep_glow, matte->bands.glow);
 	gs_effect_set_float(matte->ep_glow_amt, matte->glow_amt);
 
-	while (gs_effect_loop(matte->effect, "Matte"))
+	while (gs_effect_loop(matte->base.effect, "Matte"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&blend);
 }
 
 static void matte_video_render(void *data, gs_effect_t *effect)
@@ -1142,38 +1217,7 @@ static void matte_video_render(void *data, gs_effect_t *effect)
 	struct matte_info *matte = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(matte->source, matte_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool matte_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-			       size_t channels, size_t sample_rate)
-{
-	struct matte_info *matte = data;
-
-	return obs_transition_audio_render(matte->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space matte_video_get_color_space(void *data, size_t count,
-						       const enum gs_color_space *preferred_spaces)
-{
-	struct matte_info *matte = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(matte->source);
+	obs_transition_video_render(matte->base.source, matte_callback);
 }
 
 struct obs_source_info matte_transition = {
@@ -1184,8 +1228,8 @@ struct obs_source_info matte_transition = {
 	.destroy = matte_destroy,
 	.update = matte_update,
 	.video_render = matte_video_render,
-	.audio_render = matte_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = matte_properties,
 	.get_defaults = matte_defaults,
-	.video_get_color_space = matte_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };

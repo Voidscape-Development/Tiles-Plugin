@@ -24,7 +24,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * really open in the hold, with the incoming scene inside it and the outgoing
  * one outside.
  *
- * Needs a graphics device, so it is not part of the ctest suite:
+ * Needs a graphics device, so ctest runs it under the "gpu" label. Build with
+ * -DENABLE_GPU_TESTS=ON; on a headless machine, `xvfb-run -a ctest -L gpu`, or
+ * on its own against the effect file:
  *
  *     xvfb-run -a ./portal-check ../data/effects/portal_transition.effect
  *
@@ -43,9 +45,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "portal-math.h"
 
-#ifndef GPU_CHECK_GRAPHICS_MODULE
-#define GPU_CHECK_GRAPHICS_MODULE "libobs-opengl.so.1"
-#endif
+#include "gpu-check-video.h"
 
 #define CW 640
 #define CH 360
@@ -190,7 +190,6 @@ int main(int argc, char **argv)
 
 	if (!obs_startup("en-US", NULL, NULL))
 		return 3;
-	ovi.graphics_module = GPU_CHECK_GRAPHICS_MODULE;
 	ovi.fps_num = 30;
 	ovi.fps_den = 1;
 	ovi.base_width = CW;
@@ -201,7 +200,7 @@ int main(int argc, char **argv)
 	ovi.colorspace = VIDEO_CS_709;
 	ovi.range = VIDEO_RANGE_PARTIAL;
 	ovi.scale_type = OBS_SCALE_BICUBIC;
-	if (obs_reset_video(&ovi) != OBS_VIDEO_SUCCESS)
+	if (gpu_check_reset_video(&ovi) != OBS_VIDEO_SUCCESS)
 		return 4;
 
 	obs_enter_graphics();

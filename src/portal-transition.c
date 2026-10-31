@@ -34,10 +34,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "portal-math.h"
 #include "portal-transition.h"
+#include "presets.h"
+#include "transition-common.h"
 
 /* clang-format off */
 
-#define S_PRESET       "preset"
+#define S_PRESET       PRESET_KEY
 #define S_COLOR        "portal_color"
 #define S_CUSTOM_COLOR "custom_color"
 #define S_ORIGIN_X     "origin_x"
@@ -81,44 +83,43 @@ enum portal_color_id {
 #define ORANGE_RIM RGB_(0xFF, 0x7A, 0x00)
 #define ORANGE_CORE RGB_(0xFF, 0xE4, 0xC0)
 
+/* Preset ids are saved in scene collections, so they are permanent. */
 enum portal_preset_id {
-	PORTAL_PRESET_CUSTOM = 0,
+	PORTAL_PRESET_BLUE = 1,
+	PORTAL_PRESET_ORANGE = 2,
+	PORTAL_PRESET_QUICK = 3,
+	PORTAL_PRESET_SLOW = 4,
 };
 
 /* A whole look in one row; the centre and a custom colour are left alone. */
-struct portal_preset {
-	const char *label;
-	int color;
-	double width;
-	double size;
-	double open;
-	double hold;
-	double rim;
-	double glow;
-	double glow_reach;
-	double swirl;
-	bool spiral;
-	double sparks;
-	double distort;
+static const struct preset_column portal_columns[] = {
+	{S_COLOR, PRESET_INT},    {S_WIDTH, PRESET_DOUBLE}, {S_SIZE, PRESET_DOUBLE},   {S_OPEN, PRESET_DOUBLE},
+	{S_HOLD, PRESET_DOUBLE},  {S_RIM, PRESET_DOUBLE},   {S_GLOW, PRESET_DOUBLE},   {S_GLOW_REACH, PRESET_DOUBLE},
+	{S_SWIRL, PRESET_DOUBLE}, {S_SPIRAL, PRESET_BOOL},  {S_SPARKS, PRESET_DOUBLE}, {S_DISTORT, PRESET_DOUBLE},
 };
 
 /* clang-format off */
 
-static const struct portal_preset portal_presets[] = {
-	/* label                       colour               width size  open  hold  rim   glow   reach swirl spiral sparks distort */
-	{"Portal.Preset.Blue",        PORTAL_COLOR_BLUE,   62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0},
-	{"Portal.Preset.Orange",      PORTAL_COLOR_ORANGE, 62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0},
-	{"Portal.Preset.Quick",       PORTAL_COLOR_BLUE,   62.0, 50.0, 14.0, 10.0, 12.0, 120.0, 35.0, 1.5,  false, 140.0,  8.0},
-	{"Portal.Preset.Slow",        PORTAL_COLOR_ORANGE, 62.0, 60.0, 30.0, 35.0, 16.0,  90.0, 50.0, 0.7,  true,   60.0, 14.0},
+static const struct preset portal_presets[] = {
+	/* id                   label                     colour               width size  open  hold  rim   glow   reach swirl spiral sparks distort */
+	{PORTAL_PRESET_BLUE,   "Portal.Preset.Blue",   {PORTAL_COLOR_BLUE,   62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0}},
+	{PORTAL_PRESET_ORANGE, "Portal.Preset.Orange", {PORTAL_COLOR_ORANGE, 62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0}},
+	{PORTAL_PRESET_QUICK,  "Portal.Preset.Quick",  {PORTAL_COLOR_BLUE,   62.0, 50.0, 14.0, 10.0, 12.0, 120.0, 35.0, 1.5,  false, 140.0,  8.0}},
+	{PORTAL_PRESET_SLOW,   "Portal.Preset.Slow",   {PORTAL_COLOR_ORANGE, 62.0, 60.0, 30.0, 35.0, 16.0,  90.0, 50.0, 0.7,  true,   60.0, 14.0}},
 };
 
 /* clang-format on */
 
-#define PORTAL_PRESET_COUNT ((int)(sizeof(portal_presets) / sizeof(portal_presets[0])))
+static const struct preset_set portal_preset_set = {
+	.columns = portal_columns,
+	.column_count = TC_COUNT(portal_columns),
+	.presets = portal_presets,
+	.count = TC_COUNT(portal_presets),
+	.custom_label = "Portal.Preset.Custom",
+};
 
 struct portal_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -148,18 +149,9 @@ struct portal_info {
 	float intensity;
 	struct portal_params params; /* settled is filled in per frame */
 
-	struct vec4 rim_color, rim_color_srgb;
-	struct vec4 core_color, core_color_srgb;
+	struct tc_color rim_color;
+	struct tc_color core_color;
 };
-
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
 
 static const char *portal_get_name(void *type_data)
 {
@@ -222,68 +214,18 @@ static void portal_update(void *data, obs_data_t *settings)
 		break;
 	}
 
-	vec4_from_rgba(&portal->rim_color, rim);
-	vec4_from_rgba_srgb(&portal->rim_color_srgb, rim);
-	vec4_from_rgba(&portal->core_color, core);
-	vec4_from_rgba_srgb(&portal->core_color_srgb, core);
+	tc_color_from_rgba(&portal->rim_color, rim);
+	tc_color_from_rgba(&portal->core_color, core);
 }
 
 static void portal_defaults(obs_data_t *settings)
 {
-	const struct portal_preset *p = &portal_presets[0];
+	/* the first preset is the default look */
+	preset_set_defaults(&portal_preset_set, &portal_presets[0], settings);
 
-	obs_data_set_default_int(settings, S_PRESET, 1);
-	obs_data_set_default_int(settings, S_COLOR, p->color);
 	obs_data_set_default_int(settings, S_CUSTOM_COLOR, RGB_(0x3D, 0xFF, 0x8C));
 	obs_data_set_default_double(settings, S_ORIGIN_X, 50.0);
 	obs_data_set_default_double(settings, S_ORIGIN_Y, 50.0);
-	obs_data_set_default_double(settings, S_WIDTH, p->width);
-	obs_data_set_default_double(settings, S_SIZE, p->size);
-	obs_data_set_default_double(settings, S_OPEN, p->open);
-	obs_data_set_default_double(settings, S_HOLD, p->hold);
-	obs_data_set_default_double(settings, S_RIM, p->rim);
-	obs_data_set_default_double(settings, S_GLOW, p->glow);
-	obs_data_set_default_double(settings, S_GLOW_REACH, p->glow_reach);
-	obs_data_set_default_double(settings, S_SWIRL, p->swirl);
-	obs_data_set_default_bool(settings, S_SPIRAL, p->spiral);
-	obs_data_set_default_double(settings, S_SPARKS, p->sparks);
-	obs_data_set_default_double(settings, S_DISTORT, p->distort);
-}
-
-static bool near_enough(double a, double b)
-{
-	return fabs(a - b) < 0.001;
-}
-
-static bool preset_matches(const struct portal_preset *p, obs_data_t *s)
-{
-	return (int)obs_data_get_int(s, S_COLOR) == p->color && obs_data_get_bool(s, S_SPIRAL) == p->spiral &&
-	       near_enough(obs_data_get_double(s, S_WIDTH), p->width) &&
-	       near_enough(obs_data_get_double(s, S_SIZE), p->size) &&
-	       near_enough(obs_data_get_double(s, S_OPEN), p->open) &&
-	       near_enough(obs_data_get_double(s, S_HOLD), p->hold) &&
-	       near_enough(obs_data_get_double(s, S_RIM), p->rim) &&
-	       near_enough(obs_data_get_double(s, S_GLOW), p->glow) &&
-	       near_enough(obs_data_get_double(s, S_GLOW_REACH), p->glow_reach) &&
-	       near_enough(obs_data_get_double(s, S_SWIRL), p->swirl) &&
-	       near_enough(obs_data_get_double(s, S_SPARKS), p->sparks) &&
-	       near_enough(obs_data_get_double(s, S_DISTORT), p->distort);
-}
-
-static void preset_apply(const struct portal_preset *p, obs_data_t *s)
-{
-	obs_data_set_int(s, S_COLOR, p->color);
-	obs_data_set_bool(s, S_SPIRAL, p->spiral);
-	obs_data_set_double(s, S_WIDTH, p->width);
-	obs_data_set_double(s, S_SIZE, p->size);
-	obs_data_set_double(s, S_OPEN, p->open);
-	obs_data_set_double(s, S_HOLD, p->hold);
-	obs_data_set_double(s, S_RIM, p->rim);
-	obs_data_set_double(s, S_GLOW, p->glow);
-	obs_data_set_double(s, S_GLOW_REACH, p->glow_reach);
-	obs_data_set_double(s, S_SWIRL, p->swirl);
-	obs_data_set_double(s, S_SPARKS, p->sparks);
-	obs_data_set_double(s, S_DISTORT, p->distort);
 }
 
 /* ------------------------------------------------------------------ */
@@ -298,12 +240,9 @@ static void portal_layout(obs_properties_t *props, obs_data_t *settings)
 
 static bool portal_preset_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= PORTAL_PRESET_COUNT)
-		preset_apply(&portal_presets[id - 1], settings);
+	preset_selected(&portal_preset_set, settings);
 
 	portal_layout(props, settings);
 	return true;
@@ -311,12 +250,9 @@ static bool portal_preset_modified(obs_properties_t *props, obs_property_t *prop
 
 static bool portal_touched(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= PORTAL_PRESET_COUNT && !preset_matches(&portal_presets[id - 1], settings))
-		obs_data_set_int(settings, S_PRESET, PORTAL_PRESET_CUSTOM);
+	preset_touched(&portal_preset_set, settings);
 
 	portal_layout(props, settings);
 	return true;
@@ -332,14 +268,11 @@ static obs_properties_t *portal_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 	obs_property_t *p;
-	int i;
 
 	UNUSED_PARAMETER(data);
 
 	p = obs_properties_add_list(props, S_PRESET, T_("Portal.Preset"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(p, T_("Portal.Preset.Custom"), PORTAL_PRESET_CUSTOM);
-	for (i = 0; i < PORTAL_PRESET_COUNT; i++)
-		obs_property_list_add_int(p, T_(portal_presets[i].label), i + 1);
+	preset_fill_list(&portal_preset_set, p);
 	obs_property_set_long_description(p, T_("Portal.Preset.Description"));
 	obs_property_set_modified_callback(p, portal_preset_modified);
 
@@ -401,49 +334,38 @@ static obs_properties_t *portal_properties(void *data)
 /* render                                                             */
 /* ------------------------------------------------------------------ */
 
+/* clang-format off */
+
+static const struct tc_param portal_params[] = {
+	TC_PARAM(struct portal_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct portal_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct portal_info, ep_canvas, "canvas"),
+	TC_PARAM(struct portal_info, ep_centre_px, "centre_px"),
+	TC_PARAM(struct portal_info, ep_aspect, "aspect"),
+	TC_PARAM(struct portal_info, ep_radius, "radius"),
+	TC_PARAM(struct portal_info, ep_progress, "progress"),
+	TC_PARAM(struct portal_info, ep_rim, "rim"),
+	TC_PARAM(struct portal_info, ep_outer, "outer"),
+	TC_PARAM(struct portal_info, ep_distort, "distort"),
+	TC_PARAM(struct portal_info, ep_energy, "energy"),
+	TC_PARAM(struct portal_info, ep_sparks, "sparks"),
+	TC_PARAM(struct portal_info, ep_spark_reach, "spark_reach"),
+	TC_PARAM(struct portal_info, ep_swirl, "swirl"),
+	TC_PARAM(struct portal_info, ep_intensity, "intensity"),
+	TC_PARAM(struct portal_info, ep_color_rim, "color_rim"),
+	TC_PARAM(struct portal_info, ep_color_core, "color_core"),
+};
+
+/* clang-format on */
+
 static void *portal_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct portal_info *portal;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/portal_transition.effect");
+	struct portal_info *portal = bzalloc(sizeof(struct portal_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/portal_transition.effect is missing");
+	if (!tc_base_init(&portal->base, source, "portal_transition.effect", portal_params, TC_COUNT(portal_params))) {
+		bfree(portal);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/portal_transition.effect");
-		return NULL;
-	}
-
-	portal = bzalloc(sizeof(struct portal_info));
-	portal->source = source;
-	portal->effect = effect;
-
-	portal->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	portal->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	portal->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	portal->ep_centre_px = gs_effect_get_param_by_name(effect, "centre_px");
-	portal->ep_aspect = gs_effect_get_param_by_name(effect, "aspect");
-	portal->ep_radius = gs_effect_get_param_by_name(effect, "radius");
-	portal->ep_progress = gs_effect_get_param_by_name(effect, "progress");
-	portal->ep_rim = gs_effect_get_param_by_name(effect, "rim");
-	portal->ep_outer = gs_effect_get_param_by_name(effect, "outer");
-	portal->ep_distort = gs_effect_get_param_by_name(effect, "distort");
-	portal->ep_energy = gs_effect_get_param_by_name(effect, "energy");
-	portal->ep_sparks = gs_effect_get_param_by_name(effect, "sparks");
-	portal->ep_spark_reach = gs_effect_get_param_by_name(effect, "spark_reach");
-	portal->ep_swirl = gs_effect_get_param_by_name(effect, "swirl");
-	portal->ep_intensity = gs_effect_get_param_by_name(effect, "intensity");
-	portal->ep_color_rim = gs_effect_get_param_by_name(effect, "color_rim");
-	portal->ep_color_core = gs_effect_get_param_by_name(effect, "color_core");
 
 	/* applied directly, as the other transitions do */
 	portal_update(portal, settings);
@@ -455,10 +377,7 @@ static void portal_destroy(void *data)
 {
 	struct portal_info *portal = data;
 
-	obs_enter_graphics();
-	gs_effect_destroy(portal->effect);
-	obs_leave_graphics();
-
+	tc_base_free(&portal->base);
 	bfree(portal);
 }
 
@@ -467,12 +386,10 @@ static void portal_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	struct portal_info *portal = data;
 	struct portal_params pp = portal->params;
 	struct portal_frame frame;
+	struct tc_frame blend;
 	struct vec2 canvas, centre;
 	float fcx = (float)cx, fcy = (float)cy;
 	float cover;
-
-	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
 
 	/* Size is the oval's whole height as a share of the canvas height, so a
 	 * portal looks the same size at any resolution. */
@@ -484,19 +401,11 @@ static void portal_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	cover = portal_cover_radius(&pp, centre.x, centre.y, fcx, fcy);
 	portal_frame_at(&pp, cover, t, &frame);
 
-	gs_enable_framebuffer_srgb(!nonlinear);
-
-	if (nonlinear) {
-		gs_effect_set_texture(portal->ep_a_tex, a);
-		gs_effect_set_texture(portal->ep_b_tex, b);
-		gs_effect_set_vec4(portal->ep_color_rim, &portal->rim_color);
-		gs_effect_set_vec4(portal->ep_color_core, &portal->core_color);
-	} else {
-		gs_effect_set_texture_srgb(portal->ep_a_tex, a);
-		gs_effect_set_texture_srgb(portal->ep_b_tex, b);
-		gs_effect_set_vec4(portal->ep_color_rim, &portal->rim_color_srgb);
-		gs_effect_set_vec4(portal->ep_color_core, &portal->core_color_srgb);
-	}
+	tc_frame_begin(&blend);
+	tc_set_texture(&blend, portal->ep_a_tex, a);
+	tc_set_texture(&blend, portal->ep_b_tex, b);
+	tc_set_color(&blend, portal->ep_color_rim, &portal->rim_color);
+	tc_set_color(&blend, portal->ep_color_core, &portal->core_color);
 
 	gs_effect_set_vec2(portal->ep_canvas, &canvas);
 	gs_effect_set_vec2(portal->ep_centre_px, &centre);
@@ -516,10 +425,10 @@ static void portal_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(portal->ep_swirl, portal->swirl);
 	gs_effect_set_float(portal->ep_intensity, portal->intensity);
 
-	while (gs_effect_loop(portal->effect, "Portal"))
+	while (gs_effect_loop(portal->base.effect, "Portal"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&blend);
 }
 
 static void portal_video_render(void *data, gs_effect_t *effect)
@@ -527,38 +436,7 @@ static void portal_video_render(void *data, gs_effect_t *effect)
 	struct portal_info *portal = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(portal->source, portal_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool portal_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-				size_t channels, size_t sample_rate)
-{
-	struct portal_info *portal = data;
-
-	return obs_transition_audio_render(portal->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space portal_video_get_color_space(void *data, size_t count,
-							const enum gs_color_space *preferred_spaces)
-{
-	struct portal_info *portal = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(portal->source);
+	obs_transition_video_render(portal->base.source, portal_callback);
 }
 
 struct obs_source_info portal_transition = {
@@ -569,8 +447,8 @@ struct obs_source_info portal_transition = {
 	.destroy = portal_destroy,
 	.update = portal_update,
 	.video_render = portal_video_render,
-	.audio_render = portal_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = portal_properties,
 	.get_defaults = portal_defaults,
-	.video_get_color_space = portal_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };

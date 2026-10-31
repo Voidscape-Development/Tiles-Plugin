@@ -50,8 +50,16 @@ target_sources(
     src/portal-math.h
     src/portal-transition.c
     src/portal-transition.h
+    src/presets.c
+    src/presets.h
+    src/tiles-math.c
+    src/tiles-math.h
     src/tiles-transition.c
     src/tiles-transition.h
+    src/transition-common.c
+    src/transition-common.h
+    src/vortex-math.c
+    src/vortex-math.h
     src/vortex-transition.c
     src/vortex-transition.h
 )
@@ -65,48 +73,53 @@ option(ENABLE_GPU_TESTS "Build the effect check that renders on a real graphics 
 
 if(ENABLE_TESTS)
   enable_testing()
-  add_executable(test-tiling test/test-tiling.c)
-  if(NOT MSVC)
-    target_link_libraries(test-tiling PRIVATE m)
-  endif()
-  add_test(NAME test-tiling COMMAND test-tiling)
+  # Tests that compile an effect's *_math.effect as C++, through test/hlsl.hpp,
+  # so they check the code the shader runs rather than a copy of it. HLSL
+  # literals are single precision, and with GCC so are these.
+  function(add_shader_test name)
+    add_executable(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE src test data/effects)
+    target_compile_features(${name} PRIVATE cxx_std_17)
+    target_compile_options(${name} PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fsingle-precision-constant>)
+    if(NOT MSVC)
+      target_link_libraries(${name} PRIVATE m)
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+  endfunction()
 
-  add_executable(test-vortex test/test-vortex.c)
-  if(NOT MSVC)
-    target_link_libraries(test-vortex PRIVATE m)
-  endif()
-  add_test(NAME test-vortex COMMAND test-vortex)
+  add_shader_test(test-tiling test/test-tiling.cpp src/tiles-math.c)
+  add_shader_test(test-vortex test/test-vortex.cpp src/vortex-math.c)
+  add_shader_test(test-portal test/test-portal.cpp src/portal-math.c)
 
-  # The glass transition builds its shards in C rather than in a shader, so the
-  # test links that code instead of mirroring it.
+  # The matte field and the shard motion are needed on the CPU as well, by the
+  # plugin itself, so they exist in C too; this holds each to its shader.
+  add_shader_test(test-mirrors test/test-mirrors.cpp src/matte-math.c src/glass-mesh.c)
+
+  # The glass transition builds its shards in C rather than in a shader, and
+  # the matte transition its clock and its range, so these tests link that code
+  # directly.
   add_executable(test-glass test/test-glass.c src/glass-mesh.c)
   if(NOT MSVC)
     target_link_libraries(test-glass PRIVATE m)
   endif()
   add_test(NAME test-glass COMMAND test-glass)
 
-  # Like the glass transition, the matte and portal transitions keep the math
-  # their uniforms are built from in plain C, so the tests link it directly.
   add_executable(test-matte test/test-matte.c src/matte-math.c)
   target_include_directories(test-matte PRIVATE src)
   if(NOT MSVC)
     target_link_libraries(test-matte PRIVATE m)
   endif()
   add_test(NAME test-matte COMMAND test-matte)
-
-  add_executable(test-portal test/test-portal.c src/portal-math.c)
-  target_include_directories(test-portal PRIVATE src)
-  if(NOT MSVC)
-    target_link_libraries(test-portal PRIVATE m)
-  endif()
-  add_test(NAME test-portal COMMAND test-portal)
 endif()
 
-# Not part of the ctest suite: it needs a graphics device, so it is run by hand
-# (under xvfb-run on a headless machine) against data/effects/tiles_transition.effect.
+# These render on a real graphics device, so they carry the "gpu" label and are
+# left out of a plain `ctest -LE gpu` run. On a headless machine run them under
+# xvfb-run: `xvfb-run -a ctest -L gpu`.
 if(ENABLE_GPU_TESTS)
-  add_executable(gpu-check test/gpu-check.c)
+  enable_testing()
+  add_executable(gpu-check test/gpu-check.c src/tiles-math.c)
   target_link_libraries(gpu-check PRIVATE OBS::libobs)
+  target_include_directories(gpu-check PRIVATE src)
   if(NOT MSVC)
     target_link_libraries(gpu-check PRIVATE m)
   endif()
@@ -132,7 +145,7 @@ if(ENABLE_GPU_TESTS)
 
   # Sprite effects like the tiling one, but with uniforms of their own and a
   # schedule from their own math, so each gets a check of its own.
-  foreach(check IN ITEMS matte portal)
+  foreach(check IN ITEMS matte portal vortex)
     add_executable(${check}-check test/${check}-check.c src/${check}-math.c)
     target_link_libraries(${check}-check PRIVATE OBS::libobs)
     target_include_directories(${check}-check PRIVATE src)
@@ -144,6 +157,41 @@ if(ENABLE_GPU_TESTS)
     elseif(WIN32)
       target_compile_definitions(${check}-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
     endif()
+  endforeach()
+
+  # Loads the plugin module itself and drives each transition through libobs,
+  # so it runs the plugin's own code between the settings and the effects.
+  add_executable(plugin-check test/plugin-check.c)
+  target_link_libraries(plugin-check PRIVATE OBS::libobs)
+  if(APPLE)
+    target_compile_definitions(plugin-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-opengl.dylib")
+  elseif(WIN32)
+    target_compile_definitions(plugin-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
+  endif()
+  add_dependencies(plugin-check ${CMAKE_PROJECT_NAME})
+  add_test(
+    NAME plugin-check
+    COMMAND plugin-check "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>" "${CMAKE_CURRENT_SOURCE_DIR}/data"
+  )
+  set_tests_properties(plugin-check PROPERTIES LABELS gpu)
+
+  # Each check renders the effect of the same name, but for the tiling one,
+  # which was the first and is called gpu-check.
+  foreach(
+    effect
+    IN
+    ITEMS tiles glass matte portal vortex
+  )
+    if(effect STREQUAL "tiles")
+      set(exe gpu)
+    else()
+      set(exe ${effect})
+    endif()
+    add_test(
+      NAME ${exe}-check
+      COMMAND ${exe}-check "${CMAKE_CURRENT_SOURCE_DIR}/data/effects/${effect}_transition.effect"
+    )
+    set_tests_properties(${exe}-check PROPERTIES LABELS gpu)
   endforeach()
 endif()
 

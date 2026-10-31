@@ -959,9 +959,9 @@ float glass_crack_front(float progress, float crack_end, int easing)
 }
 
 /*
- * NOTE: mirrored by shard_xform() in data/effects/glass_transition.effect.
- * Keep the two in sync - the shader is what the viewer sees, and this is what
- * the depth sort and the tests believe.
+ * The twin of shard_xform() in data/effects/glass_math.effect: the shader is
+ * what the viewer sees, and this is what the depth sort and the tests believe.
+ * test/test-mirrors.cpp holds the two together.
  */
 void glass_shard_xform(const struct glass_motion *motion, const struct glass_shard *shard, struct glass_xform *out)
 {

@@ -217,6 +217,24 @@ jobs:
           target: x86_64
           config: ${{ needs.check-event.outputs.config }}
 
+      - name: Run Tests 🧪
+        run: |
+          : Run Tests 🧪
+          if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
+
+          # The build step above installed obs-studio, which brings the OpenGL
+          # graphics module the GPU checks load. Xvfb and Mesa's software
+          # rasteriser give them a device to render on.
+          sudo apt-get -o APT::Architecture-Variants=amd64 install -y --no-install-recommends \
+            xvfb xauth libgl1-mesa-dri
+
+          cmake -S . -B build_tests -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DENABLE_TESTS=ON -DENABLE_GPU_TESTS=ON
+          cmake --build build_tests --parallel
+
+          ctest --test-dir build_tests --output-on-failure --label-exclude gpu --parallel "$(nproc)"
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ctest --test-dir build_tests --output-on-failure --label-regex gpu
+
       - name: Package Plugin 📀
         uses: ./.github/actions/package-plugin
         with:
