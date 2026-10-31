@@ -611,16 +611,28 @@ float4 PSTiles(VertData v_in) : TARGET
 	/* dissolves: the outgoing scene is cropped or squeezed into the tile */
 	float2 centre_uv = tile.centre_px / canvas;
 
-	float4 base = b_tex.Sample(textureSampler, uv);
+	float4 base;
 
 	if (b_tiles) {
 		float grow = 1.0 - tile.s;
-		float2 uv_b = uv;
-		if (mode == 4)
-			uv_b = centre_uv + (uv - centre_uv) / max(grow, 0.0001);
+		float cov_b = tile_coverage(tile.metric, grow, tile.aa);
 
-		base = lerp(tile_colour(tile), b_tex.Sample(textureSampler, uv_b),
-			    tile_coverage(tile.metric, grow, tile.aa));
+		base = tile_colour(tile);
+
+		/* The incoming tile has the same problem at the other end of the
+		 * transition: one that has not started growing would read the
+		 * incoming scene magnified up to 10000x, and those are most of
+		 * the canvas in the opening frames. Skipped the same way as the
+		 * outgoing sample below, and for the same reasons. */
+		if (cov_b > 0.0) {
+			float2 uv_b = uv;
+			if (mode == 4)
+				uv_b = centre_uv + (uv - centre_uv) / max(grow, 0.0001);
+
+			base = lerp(base, b_tex.SampleLevel(textureSampler, uv_b, 0.0), cov_b);
+		}
+	} else {
+		base = b_tex.SampleLevel(textureSampler, uv, 0.0);
 	}
 
 	/*

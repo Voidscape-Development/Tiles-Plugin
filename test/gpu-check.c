@@ -311,6 +311,20 @@ int main(int argc, char **argv)
 		check(share_of(0, 0, 255) > 0.999, "scale shrink + tiled entry / %s: t=1 incoming scene only %.4f",
 		      shape_name[shape], share_of(0, 0, 255));
 
+		/* both dissolves with the incoming scene tiled too, part way: the
+		 * incoming tile's sample is skipped until it starts growing, and
+		 * the gap it leaves has to be tile colour rather than nothing */
+		for (int mode = 3; mode <= 4; mode++) {
+			for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); i++) {
+				double black;
+
+				draw(mode, shape, 1, times[i], 0.0f, 40.0f, 60.0f, 7.0f, false, false, true);
+				black = share_of(0, 0, 0);
+				check(black < 0.001, "%s + tiled entry / %s: t=%.2f: %.4f of the canvas is blank",
+				      mode_name[mode], shape_name[shape], times[i], black);
+			}
+		}
+
 		draw(0, shape, 4, 0.5f, 214.0f, -40.0f, 130.0f, 0.0f, false, false, false);
 		check(share_of(0, 255, 0) > 0.999,
 		      "cover from an off-canvas origin / %s: tiles cover only %.4f at t=0.5", shape_name[shape],
