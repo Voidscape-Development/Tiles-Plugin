@@ -34,11 +34,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "portal-math.h"
 #include "portal-transition.h"
+#include "presets.h"
 #include "transition-common.h"
 
 /* clang-format off */
 
-#define S_PRESET       "preset"
+#define S_PRESET       PRESET_KEY
 #define S_COLOR        "portal_color"
 #define S_CUSTOM_COLOR "custom_color"
 #define S_ORIGIN_X     "origin_x"
@@ -82,40 +83,40 @@ enum portal_color_id {
 #define ORANGE_RIM RGB_(0xFF, 0x7A, 0x00)
 #define ORANGE_CORE RGB_(0xFF, 0xE4, 0xC0)
 
+/* Preset ids are saved in scene collections, so they are permanent. */
 enum portal_preset_id {
-	PORTAL_PRESET_CUSTOM = 0,
+	PORTAL_PRESET_BLUE = 1,
+	PORTAL_PRESET_ORANGE = 2,
+	PORTAL_PRESET_QUICK = 3,
+	PORTAL_PRESET_SLOW = 4,
 };
 
 /* A whole look in one row; the centre and a custom colour are left alone. */
-struct portal_preset {
-	const char *label;
-	int color;
-	double width;
-	double size;
-	double open;
-	double hold;
-	double rim;
-	double glow;
-	double glow_reach;
-	double swirl;
-	bool spiral;
-	double sparks;
-	double distort;
+static const struct preset_column portal_columns[] = {
+	{S_COLOR, PRESET_INT},    {S_WIDTH, PRESET_DOUBLE}, {S_SIZE, PRESET_DOUBLE},   {S_OPEN, PRESET_DOUBLE},
+	{S_HOLD, PRESET_DOUBLE},  {S_RIM, PRESET_DOUBLE},   {S_GLOW, PRESET_DOUBLE},   {S_GLOW_REACH, PRESET_DOUBLE},
+	{S_SWIRL, PRESET_DOUBLE}, {S_SPIRAL, PRESET_BOOL},  {S_SPARKS, PRESET_DOUBLE}, {S_DISTORT, PRESET_DOUBLE},
 };
 
 /* clang-format off */
 
-static const struct portal_preset portal_presets[] = {
-	/* label                       colour               width size  open  hold  rim   glow   reach swirl spiral sparks distort */
-	{"Portal.Preset.Blue",        PORTAL_COLOR_BLUE,   62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0},
-	{"Portal.Preset.Orange",      PORTAL_COLOR_ORANGE, 62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0},
-	{"Portal.Preset.Quick",       PORTAL_COLOR_BLUE,   62.0, 50.0, 14.0, 10.0, 12.0, 120.0, 35.0, 1.5,  false, 140.0,  8.0},
-	{"Portal.Preset.Slow",        PORTAL_COLOR_ORANGE, 62.0, 60.0, 30.0, 35.0, 16.0,  90.0, 50.0, 0.7,  true,   60.0, 14.0},
+static const struct preset portal_presets[] = {
+	/* id                   label                     colour               width size  open  hold  rim   glow   reach swirl spiral sparks distort */
+	{PORTAL_PRESET_BLUE,   "Portal.Preset.Blue",   {PORTAL_COLOR_BLUE,   62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0}},
+	{PORTAL_PRESET_ORANGE, "Portal.Preset.Orange", {PORTAL_COLOR_ORANGE, 62.0, 55.0, 22.0, 28.0, 14.0, 100.0, 40.0, 1.0,  true,  100.0, 10.0}},
+	{PORTAL_PRESET_QUICK,  "Portal.Preset.Quick",  {PORTAL_COLOR_BLUE,   62.0, 50.0, 14.0, 10.0, 12.0, 120.0, 35.0, 1.5,  false, 140.0,  8.0}},
+	{PORTAL_PRESET_SLOW,   "Portal.Preset.Slow",   {PORTAL_COLOR_ORANGE, 62.0, 60.0, 30.0, 35.0, 16.0,  90.0, 50.0, 0.7,  true,   60.0, 14.0}},
 };
 
 /* clang-format on */
 
-#define PORTAL_PRESET_COUNT ((int)(sizeof(portal_presets) / sizeof(portal_presets[0])))
+static const struct preset_set portal_preset_set = {
+	.columns = portal_columns,
+	.column_count = TC_COUNT(portal_columns),
+	.presets = portal_presets,
+	.count = TC_COUNT(portal_presets),
+	.custom_label = "Portal.Preset.Custom",
+};
 
 struct portal_info {
 	struct transition_base base;
@@ -219,60 +220,12 @@ static void portal_update(void *data, obs_data_t *settings)
 
 static void portal_defaults(obs_data_t *settings)
 {
-	const struct portal_preset *p = &portal_presets[0];
+	/* the first preset is the default look */
+	preset_set_defaults(&portal_preset_set, &portal_presets[0], settings);
 
-	obs_data_set_default_int(settings, S_PRESET, 1);
-	obs_data_set_default_int(settings, S_COLOR, p->color);
 	obs_data_set_default_int(settings, S_CUSTOM_COLOR, RGB_(0x3D, 0xFF, 0x8C));
 	obs_data_set_default_double(settings, S_ORIGIN_X, 50.0);
 	obs_data_set_default_double(settings, S_ORIGIN_Y, 50.0);
-	obs_data_set_default_double(settings, S_WIDTH, p->width);
-	obs_data_set_default_double(settings, S_SIZE, p->size);
-	obs_data_set_default_double(settings, S_OPEN, p->open);
-	obs_data_set_default_double(settings, S_HOLD, p->hold);
-	obs_data_set_default_double(settings, S_RIM, p->rim);
-	obs_data_set_default_double(settings, S_GLOW, p->glow);
-	obs_data_set_default_double(settings, S_GLOW_REACH, p->glow_reach);
-	obs_data_set_default_double(settings, S_SWIRL, p->swirl);
-	obs_data_set_default_bool(settings, S_SPIRAL, p->spiral);
-	obs_data_set_default_double(settings, S_SPARKS, p->sparks);
-	obs_data_set_default_double(settings, S_DISTORT, p->distort);
-}
-
-static bool near_enough(double a, double b)
-{
-	return fabs(a - b) < 0.001;
-}
-
-static bool preset_matches(const struct portal_preset *p, obs_data_t *s)
-{
-	return (int)obs_data_get_int(s, S_COLOR) == p->color && obs_data_get_bool(s, S_SPIRAL) == p->spiral &&
-	       near_enough(obs_data_get_double(s, S_WIDTH), p->width) &&
-	       near_enough(obs_data_get_double(s, S_SIZE), p->size) &&
-	       near_enough(obs_data_get_double(s, S_OPEN), p->open) &&
-	       near_enough(obs_data_get_double(s, S_HOLD), p->hold) &&
-	       near_enough(obs_data_get_double(s, S_RIM), p->rim) &&
-	       near_enough(obs_data_get_double(s, S_GLOW), p->glow) &&
-	       near_enough(obs_data_get_double(s, S_GLOW_REACH), p->glow_reach) &&
-	       near_enough(obs_data_get_double(s, S_SWIRL), p->swirl) &&
-	       near_enough(obs_data_get_double(s, S_SPARKS), p->sparks) &&
-	       near_enough(obs_data_get_double(s, S_DISTORT), p->distort);
-}
-
-static void preset_apply(const struct portal_preset *p, obs_data_t *s)
-{
-	obs_data_set_int(s, S_COLOR, p->color);
-	obs_data_set_bool(s, S_SPIRAL, p->spiral);
-	obs_data_set_double(s, S_WIDTH, p->width);
-	obs_data_set_double(s, S_SIZE, p->size);
-	obs_data_set_double(s, S_OPEN, p->open);
-	obs_data_set_double(s, S_HOLD, p->hold);
-	obs_data_set_double(s, S_RIM, p->rim);
-	obs_data_set_double(s, S_GLOW, p->glow);
-	obs_data_set_double(s, S_GLOW_REACH, p->glow_reach);
-	obs_data_set_double(s, S_SWIRL, p->swirl);
-	obs_data_set_double(s, S_SPARKS, p->sparks);
-	obs_data_set_double(s, S_DISTORT, p->distort);
 }
 
 /* ------------------------------------------------------------------ */
@@ -287,12 +240,9 @@ static void portal_layout(obs_properties_t *props, obs_data_t *settings)
 
 static bool portal_preset_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= PORTAL_PRESET_COUNT)
-		preset_apply(&portal_presets[id - 1], settings);
+	preset_selected(&portal_preset_set, settings);
 
 	portal_layout(props, settings);
 	return true;
@@ -300,12 +250,9 @@ static bool portal_preset_modified(obs_properties_t *props, obs_property_t *prop
 
 static bool portal_touched(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= PORTAL_PRESET_COUNT && !preset_matches(&portal_presets[id - 1], settings))
-		obs_data_set_int(settings, S_PRESET, PORTAL_PRESET_CUSTOM);
+	preset_touched(&portal_preset_set, settings);
 
 	portal_layout(props, settings);
 	return true;
@@ -321,14 +268,11 @@ static obs_properties_t *portal_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 	obs_property_t *p;
-	int i;
 
 	UNUSED_PARAMETER(data);
 
 	p = obs_properties_add_list(props, S_PRESET, T_("Portal.Preset"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(p, T_("Portal.Preset.Custom"), PORTAL_PRESET_CUSTOM);
-	for (i = 0; i < PORTAL_PRESET_COUNT; i++)
-		obs_property_list_add_int(p, T_(portal_presets[i].label), i + 1);
+	preset_fill_list(&portal_preset_set, p);
 	obs_property_set_long_description(p, T_("Portal.Preset.Description"));
 	obs_property_set_modified_callback(p, portal_preset_modified);
 

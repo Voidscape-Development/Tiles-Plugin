@@ -50,6 +50,8 @@ target_sources(
     src/portal-math.h
     src/portal-transition.c
     src/portal-transition.h
+    src/presets.c
+    src/presets.h
     src/tiles-transition.c
     src/tiles-transition.h
     src/transition-common.c

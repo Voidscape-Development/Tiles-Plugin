@@ -43,11 +43,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "matte-math.h"
 #include "matte-transition.h"
+#include "presets.h"
 #include "transition-common.h"
 
 /* clang-format off */
 
-#define S_PRESET       "preset"
+#define S_PRESET       PRESET_KEY
 #define S_SHAPE        "shape"
 #define S_DIRECTION    "direction"
 #define S_STAR_POINTS  "star_points"
@@ -110,45 +111,91 @@ static const char *const echo_label[MATTE_ECHOES] = {
 	"Matte.EchoColor4",
 };
 
+/* Preset ids are saved in scene collections, so they are permanent. */
 enum matte_preset_id {
-	MATTE_PRESET_CUSTOM = 0,
+	MATTE_PRESET_IRIS_OUT = 1,
+	MATTE_PRESET_CARTOON = 2,
+	MATTE_PRESET_STAR = 3,
+	MATTE_PRESET_HEXAGON = 4,
+	MATTE_PRESET_HEART = 5,
+	MATTE_PRESET_WAVE = 6,
+	MATTE_PRESET_CLOCK = 7,
+	MATTE_PRESET_BLINDS = 8,
 };
 
 /*
  * A whole look in one row, the way the glass transition does it: picking a
- * preset writes every one of these, and touching any of them afterwards puts
- * the list back to Custom. The centre and the image are left alone - they are
- * where and what, not how.
+ * preset writes every column, and touching any of them afterwards puts the list
+ * back to Custom. The centre and the image are left alone - they are where and
+ * what, not how.
+ *
+ * The columns are named, and the rows below set them by name, because there
+ * are too many for a row of bare numbers to stay readable.
  */
-struct matte_preset {
-	const char *label;
-	int shape;
-	int direction;
-	double star_points;
-	double star_depth;
-	double arms;
-	double turns;
-	double bars;
-	double wave_height;
-	double wave_length;
-	double wave_drift;
-	double lobes;
-	double angle;
-	double spin;
-	double stretch;
-	int easing;
-	double overshoot;
-	double pause_size;
-	double pause_len;
-	double feather;
-	double border;
-	uint32_t border_color;
-	int echo_count;
-	double echo_width;
-	uint32_t echo_color[MATTE_ECHOES];
-	double glow;
-	double glow_width;
-	uint32_t glow_color;
+enum matte_column {
+	MC_SHAPE,
+	MC_DIRECTION,
+	MC_STAR_POINTS,
+	MC_STAR_DEPTH,
+	MC_ARMS,
+	MC_TURNS,
+	MC_BARS,
+	MC_WAVE_HEIGHT,
+	MC_WAVE_LENGTH,
+	MC_WAVE_DRIFT,
+	MC_LOBES,
+	MC_ANGLE,
+	MC_SPIN,
+	MC_STRETCH,
+	MC_EASING,
+	MC_OVERSHOOT,
+	MC_PAUSE_SIZE,
+	MC_PAUSE_LEN,
+	MC_FEATHER,
+	MC_BORDER,
+	MC_BORDER_COLOR,
+	MC_ECHO_COUNT,
+	MC_ECHO_WIDTH,
+	MC_ECHO_COLOR1,
+	MC_ECHO_COLOR2,
+	MC_ECHO_COLOR3,
+	MC_ECHO_COLOR4,
+	MC_GLOW,
+	MC_GLOW_WIDTH,
+	MC_GLOW_COLOR,
+};
+
+static const struct preset_column matte_columns[] = {
+	[MC_SHAPE] = {S_SHAPE, PRESET_INT},
+	[MC_DIRECTION] = {S_DIRECTION, PRESET_INT},
+	[MC_STAR_POINTS] = {S_STAR_POINTS, PRESET_INT},
+	[MC_STAR_DEPTH] = {S_STAR_DEPTH, PRESET_DOUBLE},
+	[MC_ARMS] = {S_ARMS, PRESET_INT},
+	[MC_TURNS] = {S_TURNS, PRESET_DOUBLE},
+	[MC_BARS] = {S_BARS, PRESET_INT},
+	[MC_WAVE_HEIGHT] = {S_WAVE_HEIGHT, PRESET_DOUBLE},
+	[MC_WAVE_LENGTH] = {S_WAVE_LENGTH, PRESET_DOUBLE},
+	[MC_WAVE_DRIFT] = {S_WAVE_DRIFT, PRESET_DOUBLE},
+	[MC_LOBES] = {S_LOBES, PRESET_INT},
+	[MC_ANGLE] = {S_ANGLE, PRESET_DOUBLE},
+	[MC_SPIN] = {S_SPIN, PRESET_DOUBLE},
+	[MC_STRETCH] = {S_STRETCH, PRESET_DOUBLE},
+	[MC_EASING] = {S_EASING, PRESET_INT},
+	[MC_OVERSHOOT] = {S_OVERSHOOT, PRESET_DOUBLE},
+	[MC_PAUSE_SIZE] = {S_PAUSE_SIZE, PRESET_DOUBLE},
+	[MC_PAUSE_LEN] = {S_PAUSE_LEN, PRESET_DOUBLE},
+	[MC_FEATHER] = {S_FEATHER, PRESET_DOUBLE},
+	[MC_BORDER] = {S_BORDER, PRESET_DOUBLE},
+	[MC_BORDER_COLOR] = {S_BORDER_COLOR, PRESET_COLOR},
+	[MC_ECHO_COUNT] = {S_ECHO_COUNT, PRESET_INT},
+	[MC_ECHO_WIDTH] = {S_ECHO_WIDTH, PRESET_DOUBLE},
+	[MC_ECHO_COLOR1] = {S_ECHO_COLOR1, PRESET_COLOR},
+	[MC_ECHO_COLOR2] = {S_ECHO_COLOR2, PRESET_COLOR},
+	[MC_ECHO_COLOR3] = {S_ECHO_COLOR3, PRESET_COLOR},
+	[MC_ECHO_COLOR4] = {S_ECHO_COLOR4, PRESET_COLOR},
+	[MC_GLOW] = {S_GLOW, PRESET_DOUBLE},
+	[MC_GLOW_WIDTH] = {S_GLOW_WIDTH, PRESET_DOUBLE},
+	[MC_GLOW_COLOR] = {S_GLOW_COLOR, PRESET_COLOR},
 };
 
 #define WHITE RGB_(0xFF, 0xFF, 0xFF)
@@ -160,92 +207,146 @@ struct matte_preset {
 
 /* clang-format off */
 
-static const struct matte_preset matte_presets[] = {
+static const struct preset matte_presets[] = {
 	{
-		.label = "Matte.Preset.IrisOut", .shape = MATTE_SHAPE_CIRCLE, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 1,
-		.border = 0, .border_color = WHITE,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_IRIS_OUT,
+		.label = "Matte.Preset.IrisOut",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_CIRCLE, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 1,
+			[MC_BORDER] = 0, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Cartoon", .shape = MATTE_SHAPE_CIRCLE, .direction = MATTE_DIR_IN,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_OVERSHOOT, .overshoot = 60,
-		.pause_size = 22, .pause_len = 30, .feather = 1,
-		.border = 8, .border_color = BLACK,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_CARTOON,
+		.label = "Matte.Preset.Cartoon",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_CIRCLE, [MC_DIRECTION] = MATTE_DIR_IN,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_OVERSHOOT, [MC_OVERSHOOT] = 60,
+			[MC_PAUSE_SIZE] = 22, [MC_PAUSE_LEN] = 30, [MC_FEATHER] = 1,
+			[MC_BORDER] = 8, [MC_BORDER_COLOR] = BLACK,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Star", .shape = MATTE_SHAPE_STAR, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0.35, .stretch = 100, .easing = MATTE_EASE_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 2,
-		.border = 14, .border_color = WHITE,
-		.echo_count = 2, .echo_width = 70, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_STAR,
+		.label = "Matte.Preset.Star",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_STAR, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0.35, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 2,
+			[MC_BORDER] = 14, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 2, [MC_ECHO_WIDTH] = 70,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Hexagon", .shape = MATTE_SHAPE_HEXAGON, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 1.0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 2,
-		.border = 0, .border_color = WHITE,
-		.echo_count = 3, .echo_width = 50, .echo_color = {PINK, AMBER, CYAN, PURPLE},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_HEXAGON,
+		.label = "Matte.Preset.Hexagon",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_HEXAGON, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 1.0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 2,
+			[MC_BORDER] = 0, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 3, [MC_ECHO_WIDTH] = 50,
+			[MC_ECHO_COLOR1] = PINK, [MC_ECHO_COLOR2] = AMBER, [MC_ECHO_COLOR3] = CYAN, [MC_ECHO_COLOR4] = PURPLE,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Heart", .shape = MATTE_SHAPE_HEART, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_OVERSHOOT, .overshoot = 80,
-		.pause_size = 30, .pause_len = 25, .feather = 2,
-		.border = 10, .border_color = WHITE,
-		.echo_count = 1, .echo_width = 30, .echo_color = {RGB_(0xFF, 0x4D, 0x88), PURPLE, PINK, AMBER},
-		.glow = 60, .glow_width = 50, .glow_color = RGB_(0xFF, 0x9E, 0xC4),
+		.id = MATTE_PRESET_HEART,
+		.label = "Matte.Preset.Heart",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_HEART, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_OVERSHOOT, [MC_OVERSHOOT] = 80,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 25, [MC_FEATHER] = 2,
+			[MC_BORDER] = 10, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 1, [MC_ECHO_WIDTH] = 30,
+			[MC_ECHO_COLOR1] = RGB_(0xFF, 0x4D, 0x88), [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 60, [MC_GLOW_WIDTH] = 50, [MC_GLOW_COLOR] = RGB_(0xFF, 0x9E, 0xC4),
+		},
 	},
 	{
-		.label = "Matte.Preset.Wave", .shape = MATTE_SHAPE_WAVE, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.5, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 2,
-		.border = 18, .border_color = RGB_(0xE8, 0xFB, 0xFF),
-		.echo_count = 2, .echo_width = 45, .echo_color = {RGB_(0x29, 0xB6, 0xF6), RGB_(0x0D, 0x47, 0xA1), PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_WAVE,
+		.label = "Matte.Preset.Wave",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_WAVE, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.5, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 2,
+			[MC_BORDER] = 18, [MC_BORDER_COLOR] = RGB_(0xE8, 0xFB, 0xFF),
+			[MC_ECHO_COUNT] = 2, [MC_ECHO_WIDTH] = 45,
+			[MC_ECHO_COLOR1] = RGB_(0x29, 0xB6, 0xF6), [MC_ECHO_COLOR2] = RGB_(0x0D, 0x47, 0xA1), [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 	{
-		.label = "Matte.Preset.Clock", .shape = MATTE_SHAPE_CLOCK, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_LINEAR, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 1,
-		.border = 8, .border_color = WHITE,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 80, .glow_width = 30, .glow_color = CYAN,
+		.id = MATTE_PRESET_CLOCK,
+		.label = "Matte.Preset.Clock",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_CLOCK, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_LINEAR, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 1,
+			[MC_BORDER] = 8, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 80, [MC_GLOW_WIDTH] = 30, [MC_GLOW_COLOR] = CYAN,
+		},
 	},
 	{
-		.label = "Matte.Preset.Blinds", .shape = MATTE_SHAPE_BLINDS, .direction = MATTE_DIR_OUT,
-		.star_points = 5, .star_depth = 45, .arms = 1, .turns = 3, .bars = 8,
-		.wave_height = 60, .wave_length = 420, .wave_drift = 1.0, .lobes = 8,
-		.angle = 0, .spin = 0, .stretch = 100, .easing = MATTE_EASE_IN_OUT, .overshoot = 50,
-		.pause_size = 30, .pause_len = 0, .feather = 1,
-		.border = 6, .border_color = WHITE,
-		.echo_count = 0, .echo_width = 60, .echo_color = {CYAN, PURPLE, PINK, AMBER},
-		.glow = 0, .glow_width = 40, .glow_color = WHITE,
+		.id = MATTE_PRESET_BLINDS,
+		.label = "Matte.Preset.Blinds",
+		.value = {
+			[MC_SHAPE] = MATTE_SHAPE_BLINDS, [MC_DIRECTION] = MATTE_DIR_OUT,
+			[MC_STAR_POINTS] = 5, [MC_STAR_DEPTH] = 45, [MC_ARMS] = 1, [MC_TURNS] = 3, [MC_BARS] = 8,
+			[MC_WAVE_HEIGHT] = 60, [MC_WAVE_LENGTH] = 420, [MC_WAVE_DRIFT] = 1.0, [MC_LOBES] = 8,
+			[MC_ANGLE] = 0, [MC_SPIN] = 0, [MC_STRETCH] = 100,
+			[MC_EASING] = MATTE_EASE_IN_OUT, [MC_OVERSHOOT] = 50,
+			[MC_PAUSE_SIZE] = 30, [MC_PAUSE_LEN] = 0, [MC_FEATHER] = 1,
+			[MC_BORDER] = 6, [MC_BORDER_COLOR] = WHITE,
+			[MC_ECHO_COUNT] = 0, [MC_ECHO_WIDTH] = 60,
+			[MC_ECHO_COLOR1] = CYAN, [MC_ECHO_COLOR2] = PURPLE, [MC_ECHO_COLOR3] = PINK, [MC_ECHO_COLOR4] = AMBER,
+			[MC_GLOW] = 0, [MC_GLOW_WIDTH] = 40, [MC_GLOW_COLOR] = WHITE,
+		},
 	},
 };
 
 /* clang-format on */
 
-#define MATTE_PRESET_COUNT ((int)(sizeof(matte_presets) / sizeof(matte_presets[0])))
+static const struct preset_set matte_preset_set = {
+	.columns = matte_columns,
+	.column_count = TC_COUNT(matte_columns),
+	.presets = matte_presets,
+	.count = TC_COUNT(matte_presets),
+	.custom_label = "Matte.Preset.Custom",
+};
 
 struct matte_info {
 	struct transition_base base;
@@ -600,125 +701,12 @@ static void matte_destroy(void *data)
 
 static void matte_defaults(obs_data_t *settings)
 {
-	const struct matte_preset *p = &matte_presets[0];
-	int i;
+	/* the first preset is the default look */
+	preset_set_defaults(&matte_preset_set, &matte_presets[0], settings);
 
-	obs_data_set_default_int(settings, S_PRESET, 1);
-	obs_data_set_default_int(settings, S_SHAPE, p->shape);
-	obs_data_set_default_int(settings, S_DIRECTION, p->direction);
-	obs_data_set_default_int(settings, S_STAR_POINTS, (long long)p->star_points);
-	obs_data_set_default_double(settings, S_STAR_DEPTH, p->star_depth);
-	obs_data_set_default_int(settings, S_ARMS, (long long)p->arms);
-	obs_data_set_default_double(settings, S_TURNS, p->turns);
-	obs_data_set_default_int(settings, S_BARS, (long long)p->bars);
-	obs_data_set_default_double(settings, S_WAVE_HEIGHT, p->wave_height);
-	obs_data_set_default_double(settings, S_WAVE_LENGTH, p->wave_length);
-	obs_data_set_default_double(settings, S_WAVE_DRIFT, p->wave_drift);
-	obs_data_set_default_int(settings, S_LOBES, (long long)p->lobes);
 	obs_data_set_default_string(settings, S_IMAGE, "");
-	obs_data_set_default_double(settings, S_ANGLE, p->angle);
-	obs_data_set_default_double(settings, S_SPIN, p->spin);
-	obs_data_set_default_double(settings, S_STRETCH, p->stretch);
 	obs_data_set_default_double(settings, S_ORIGIN_X, 50.0);
 	obs_data_set_default_double(settings, S_ORIGIN_Y, 50.0);
-	obs_data_set_default_int(settings, S_EASING, p->easing);
-	obs_data_set_default_double(settings, S_OVERSHOOT, p->overshoot);
-	obs_data_set_default_double(settings, S_PAUSE_SIZE, p->pause_size);
-	obs_data_set_default_double(settings, S_PAUSE_LEN, p->pause_len);
-	obs_data_set_default_double(settings, S_FEATHER, p->feather);
-	obs_data_set_default_double(settings, S_BORDER, p->border);
-	obs_data_set_default_int(settings, S_BORDER_COLOR, p->border_color);
-	obs_data_set_default_int(settings, S_ECHO_COUNT, p->echo_count);
-	obs_data_set_default_double(settings, S_ECHO_WIDTH, p->echo_width);
-	for (i = 0; i < MATTE_ECHOES; i++)
-		obs_data_set_default_int(settings, echo_setting[i], p->echo_color[i]);
-	obs_data_set_default_double(settings, S_GLOW, p->glow);
-	obs_data_set_default_double(settings, S_GLOW_WIDTH, p->glow_width);
-	obs_data_set_default_int(settings, S_GLOW_COLOR, p->glow_color);
-}
-
-static bool near_enough(double a, double b)
-{
-	return fabs(a - b) < 0.001;
-}
-
-static bool same_color(obs_data_t *s, const char *name, uint32_t c)
-{
-	return ((uint32_t)obs_data_get_int(s, name) & 0xFFFFFF) == (c & 0xFFFFFF);
-}
-
-static bool preset_matches(const struct matte_preset *p, obs_data_t *s)
-{
-	int i;
-
-	if ((int)obs_data_get_int(s, S_SHAPE) != p->shape || (int)obs_data_get_int(s, S_DIRECTION) != p->direction ||
-	    (int)obs_data_get_int(s, S_EASING) != p->easing || (int)obs_data_get_int(s, S_ECHO_COUNT) != p->echo_count)
-		return false;
-
-	if (!near_enough((double)obs_data_get_int(s, S_STAR_POINTS), p->star_points) ||
-	    !near_enough(obs_data_get_double(s, S_STAR_DEPTH), p->star_depth) ||
-	    !near_enough((double)obs_data_get_int(s, S_ARMS), p->arms) ||
-	    !near_enough(obs_data_get_double(s, S_TURNS), p->turns) ||
-	    !near_enough((double)obs_data_get_int(s, S_BARS), p->bars) ||
-	    !near_enough(obs_data_get_double(s, S_WAVE_HEIGHT), p->wave_height) ||
-	    !near_enough(obs_data_get_double(s, S_WAVE_LENGTH), p->wave_length) ||
-	    !near_enough(obs_data_get_double(s, S_WAVE_DRIFT), p->wave_drift) ||
-	    !near_enough((double)obs_data_get_int(s, S_LOBES), p->lobes) ||
-	    !near_enough(obs_data_get_double(s, S_ANGLE), p->angle) ||
-	    !near_enough(obs_data_get_double(s, S_SPIN), p->spin) ||
-	    !near_enough(obs_data_get_double(s, S_STRETCH), p->stretch) ||
-	    !near_enough(obs_data_get_double(s, S_OVERSHOOT), p->overshoot) ||
-	    !near_enough(obs_data_get_double(s, S_PAUSE_SIZE), p->pause_size) ||
-	    !near_enough(obs_data_get_double(s, S_PAUSE_LEN), p->pause_len) ||
-	    !near_enough(obs_data_get_double(s, S_FEATHER), p->feather) ||
-	    !near_enough(obs_data_get_double(s, S_BORDER), p->border) ||
-	    !near_enough(obs_data_get_double(s, S_ECHO_WIDTH), p->echo_width) ||
-	    !near_enough(obs_data_get_double(s, S_GLOW), p->glow) ||
-	    !near_enough(obs_data_get_double(s, S_GLOW_WIDTH), p->glow_width))
-		return false;
-
-	if (!same_color(s, S_BORDER_COLOR, p->border_color) || !same_color(s, S_GLOW_COLOR, p->glow_color))
-		return false;
-
-	for (i = 0; i < MATTE_ECHOES; i++)
-		if (!same_color(s, echo_setting[i], p->echo_color[i]))
-			return false;
-
-	return true;
-}
-
-static void preset_apply(const struct matte_preset *p, obs_data_t *s)
-{
-	int i;
-
-	obs_data_set_int(s, S_SHAPE, p->shape);
-	obs_data_set_int(s, S_DIRECTION, p->direction);
-	obs_data_set_int(s, S_STAR_POINTS, (long long)p->star_points);
-	obs_data_set_double(s, S_STAR_DEPTH, p->star_depth);
-	obs_data_set_int(s, S_ARMS, (long long)p->arms);
-	obs_data_set_double(s, S_TURNS, p->turns);
-	obs_data_set_int(s, S_BARS, (long long)p->bars);
-	obs_data_set_double(s, S_WAVE_HEIGHT, p->wave_height);
-	obs_data_set_double(s, S_WAVE_LENGTH, p->wave_length);
-	obs_data_set_double(s, S_WAVE_DRIFT, p->wave_drift);
-	obs_data_set_int(s, S_LOBES, (long long)p->lobes);
-	obs_data_set_double(s, S_ANGLE, p->angle);
-	obs_data_set_double(s, S_SPIN, p->spin);
-	obs_data_set_double(s, S_STRETCH, p->stretch);
-	obs_data_set_int(s, S_EASING, p->easing);
-	obs_data_set_double(s, S_OVERSHOOT, p->overshoot);
-	obs_data_set_double(s, S_PAUSE_SIZE, p->pause_size);
-	obs_data_set_double(s, S_PAUSE_LEN, p->pause_len);
-	obs_data_set_double(s, S_FEATHER, p->feather);
-	obs_data_set_double(s, S_BORDER, p->border);
-	obs_data_set_int(s, S_BORDER_COLOR, p->border_color);
-	obs_data_set_int(s, S_ECHO_COUNT, p->echo_count);
-	obs_data_set_double(s, S_ECHO_WIDTH, p->echo_width);
-	for (i = 0; i < MATTE_ECHOES; i++)
-		obs_data_set_int(s, echo_setting[i], p->echo_color[i]);
-	obs_data_set_double(s, S_GLOW, p->glow);
-	obs_data_set_double(s, S_GLOW_WIDTH, p->glow_width);
-	obs_data_set_int(s, S_GLOW_COLOR, p->glow_color);
 }
 
 /* ------------------------------------------------------------------ */
@@ -770,12 +758,9 @@ static void matte_layout(obs_properties_t *props, obs_data_t *settings)
 
 static bool matte_preset_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= MATTE_PRESET_COUNT)
-		preset_apply(&matte_presets[id - 1], settings);
+	preset_selected(&matte_preset_set, settings);
 
 	matte_layout(props, settings);
 	return true;
@@ -786,12 +771,9 @@ static bool matte_preset_modified(obs_properties_t *props, obs_property_t *prop,
  * left it. */
 static bool matte_touched(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
-	int id = (int)obs_data_get_int(settings, S_PRESET);
-
 	UNUSED_PARAMETER(prop);
 
-	if (id >= 1 && id <= MATTE_PRESET_COUNT && !preset_matches(&matte_presets[id - 1], settings))
-		obs_data_set_int(settings, S_PRESET, MATTE_PRESET_CUSTOM);
+	preset_touched(&matte_preset_set, settings);
 
 	matte_layout(props, settings);
 	return true;
@@ -824,9 +806,7 @@ static obs_properties_t *matte_properties(void *data)
 	UNUSED_PARAMETER(data);
 
 	p = obs_properties_add_list(props, S_PRESET, T_("Matte.Preset"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(p, T_("Matte.Preset.Custom"), MATTE_PRESET_CUSTOM);
-	for (i = 0; i < MATTE_PRESET_COUNT; i++)
-		obs_property_list_add_int(p, T_(matte_presets[i].label), i + 1);
+	preset_fill_list(&matte_preset_set, p);
 	obs_property_set_long_description(p, T_("Matte.Preset.Description"));
 	obs_property_set_modified_callback(p, matte_preset_modified);
 
