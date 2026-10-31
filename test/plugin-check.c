@@ -44,9 +44,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <stdio.h>
 #include <string.h>
 
-#ifndef GPU_CHECK_GRAPHICS_MODULE
-#define GPU_CHECK_GRAPHICS_MODULE "libobs-opengl.so.1"
-#endif
+#include "gpu-check-video.h"
 
 #define CW 320
 #define CH 180
@@ -470,7 +468,6 @@ int main(int argc, char **argv)
 	if (!obs_startup("en-US", NULL, NULL))
 		return 3;
 
-	ovi.graphics_module = GPU_CHECK_GRAPHICS_MODULE;
 	ovi.fps_num = 30;
 	ovi.fps_den = 1;
 	ovi.base_width = CW;
@@ -481,7 +478,7 @@ int main(int argc, char **argv)
 	ovi.colorspace = VIDEO_CS_709;
 	ovi.range = VIDEO_RANGE_PARTIAL;
 	ovi.scale_type = OBS_SCALE_BICUBIC;
-	if (obs_reset_video(&ovi) != OBS_VIDEO_SUCCESS)
+	if (gpu_check_reset_video(&ovi) != OBS_VIDEO_SUCCESS)
 		return 4;
 
 	if (obs_open_module(&module, argv[1], argv[2]) != MODULE_SUCCESS || !obs_init_module(module)) {
