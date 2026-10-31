@@ -102,9 +102,11 @@ if(ENABLE_TESTS)
   add_test(NAME test-portal COMMAND test-portal)
 endif()
 
-# Not part of the ctest suite: it needs a graphics device, so it is run by hand
-# (under xvfb-run on a headless machine) against data/effects/tiles_transition.effect.
+# These render on a real graphics device, so they carry the "gpu" label and are
+# left out of a plain `ctest -LE gpu` run. On a headless machine run them under
+# xvfb-run: `xvfb-run -a ctest -L gpu`.
 if(ENABLE_GPU_TESTS)
+  enable_testing()
   add_executable(gpu-check test/gpu-check.c)
   target_link_libraries(gpu-check PRIVATE OBS::libobs)
   if(NOT MSVC)
@@ -144,6 +146,17 @@ if(ENABLE_GPU_TESTS)
     elseif(WIN32)
       target_compile_definitions(${check}-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
     endif()
+  endforeach()
+
+  foreach(check IN ITEMS gpu:tiles glass:glass matte:matte portal:portal)
+    string(REPLACE ":" ";" check "${check}")
+    list(GET check 0 exe)
+    list(GET check 1 effect)
+    add_test(
+      NAME ${exe}-check
+      COMMAND ${exe}-check "${CMAKE_CURRENT_SOURCE_DIR}/data/effects/${effect}_transition.effect"
+    )
+    set_tests_properties(${exe}-check PROPERTIES LABELS gpu)
   endforeach()
 endif()
 
