@@ -457,7 +457,13 @@ static void check_skips_are_sound(void)
 								want = 1.0f - effect::reveal_amount(pt.p, pt.r,
 												    effect::reveal_k);
 
-							check(got == want,
+							/* Where nothing was skipped the two run the
+							 * same expression, but a compiler that fuses
+							 * multiply-adds may fuse them differently in
+							 * the two places, as a GPU may. A skip that
+							 * threw away real coverage is off by far
+							 * more than that. */
+							check(fabsf(got - want) <= 1e-3f,
 							      "vortex_cover() skipped a pixel it got wrong: %s k %g soft %g "
 							      "r %g got %g want %g",
 							      phase == 0 ? "opening" : "revealing", (double)k,
