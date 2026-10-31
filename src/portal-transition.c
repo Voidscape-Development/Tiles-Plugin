@@ -34,6 +34,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "portal-math.h"
 #include "portal-transition.h"
+#include "transition-common.h"
 
 /* clang-format off */
 
@@ -117,8 +118,7 @@ static const struct portal_preset portal_presets[] = {
 #define PORTAL_PRESET_COUNT ((int)(sizeof(portal_presets) / sizeof(portal_presets[0])))
 
 struct portal_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -148,18 +148,9 @@ struct portal_info {
 	float intensity;
 	struct portal_params params; /* settled is filled in per frame */
 
-	struct vec4 rim_color, rim_color_srgb;
-	struct vec4 core_color, core_color_srgb;
+	struct tc_color rim_color;
+	struct tc_color core_color;
 };
-
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
 
 static const char *portal_get_name(void *type_data)
 {
@@ -222,10 +213,8 @@ static void portal_update(void *data, obs_data_t *settings)
 		break;
 	}
 
-	vec4_from_rgba(&portal->rim_color, rim);
-	vec4_from_rgba_srgb(&portal->rim_color_srgb, rim);
-	vec4_from_rgba(&portal->core_color, core);
-	vec4_from_rgba_srgb(&portal->core_color_srgb, core);
+	tc_color_from_rgba(&portal->rim_color, rim);
+	tc_color_from_rgba(&portal->core_color, core);
 }
 
 static void portal_defaults(obs_data_t *settings)
@@ -401,49 +390,38 @@ static obs_properties_t *portal_properties(void *data)
 /* render                                                             */
 /* ------------------------------------------------------------------ */
 
+/* clang-format off */
+
+static const struct tc_param portal_params[] = {
+	TC_PARAM(struct portal_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct portal_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct portal_info, ep_canvas, "canvas"),
+	TC_PARAM(struct portal_info, ep_centre_px, "centre_px"),
+	TC_PARAM(struct portal_info, ep_aspect, "aspect"),
+	TC_PARAM(struct portal_info, ep_radius, "radius"),
+	TC_PARAM(struct portal_info, ep_progress, "progress"),
+	TC_PARAM(struct portal_info, ep_rim, "rim"),
+	TC_PARAM(struct portal_info, ep_outer, "outer"),
+	TC_PARAM(struct portal_info, ep_distort, "distort"),
+	TC_PARAM(struct portal_info, ep_energy, "energy"),
+	TC_PARAM(struct portal_info, ep_sparks, "sparks"),
+	TC_PARAM(struct portal_info, ep_spark_reach, "spark_reach"),
+	TC_PARAM(struct portal_info, ep_swirl, "swirl"),
+	TC_PARAM(struct portal_info, ep_intensity, "intensity"),
+	TC_PARAM(struct portal_info, ep_color_rim, "color_rim"),
+	TC_PARAM(struct portal_info, ep_color_core, "color_core"),
+};
+
+/* clang-format on */
+
 static void *portal_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct portal_info *portal;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/portal_transition.effect");
+	struct portal_info *portal = bzalloc(sizeof(struct portal_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/portal_transition.effect is missing");
+	if (!tc_base_init(&portal->base, source, "portal_transition.effect", portal_params, TC_COUNT(portal_params))) {
+		bfree(portal);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/portal_transition.effect");
-		return NULL;
-	}
-
-	portal = bzalloc(sizeof(struct portal_info));
-	portal->source = source;
-	portal->effect = effect;
-
-	portal->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	portal->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	portal->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	portal->ep_centre_px = gs_effect_get_param_by_name(effect, "centre_px");
-	portal->ep_aspect = gs_effect_get_param_by_name(effect, "aspect");
-	portal->ep_radius = gs_effect_get_param_by_name(effect, "radius");
-	portal->ep_progress = gs_effect_get_param_by_name(effect, "progress");
-	portal->ep_rim = gs_effect_get_param_by_name(effect, "rim");
-	portal->ep_outer = gs_effect_get_param_by_name(effect, "outer");
-	portal->ep_distort = gs_effect_get_param_by_name(effect, "distort");
-	portal->ep_energy = gs_effect_get_param_by_name(effect, "energy");
-	portal->ep_sparks = gs_effect_get_param_by_name(effect, "sparks");
-	portal->ep_spark_reach = gs_effect_get_param_by_name(effect, "spark_reach");
-	portal->ep_swirl = gs_effect_get_param_by_name(effect, "swirl");
-	portal->ep_intensity = gs_effect_get_param_by_name(effect, "intensity");
-	portal->ep_color_rim = gs_effect_get_param_by_name(effect, "color_rim");
-	portal->ep_color_core = gs_effect_get_param_by_name(effect, "color_core");
 
 	/* applied directly, as the other transitions do */
 	portal_update(portal, settings);
@@ -455,10 +433,7 @@ static void portal_destroy(void *data)
 {
 	struct portal_info *portal = data;
 
-	obs_enter_graphics();
-	gs_effect_destroy(portal->effect);
-	obs_leave_graphics();
-
+	tc_base_free(&portal->base);
 	bfree(portal);
 }
 
@@ -467,12 +442,10 @@ static void portal_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	struct portal_info *portal = data;
 	struct portal_params pp = portal->params;
 	struct portal_frame frame;
+	struct tc_frame blend;
 	struct vec2 canvas, centre;
 	float fcx = (float)cx, fcy = (float)cy;
 	float cover;
-
-	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
 
 	/* Size is the oval's whole height as a share of the canvas height, so a
 	 * portal looks the same size at any resolution. */
@@ -484,19 +457,11 @@ static void portal_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	cover = portal_cover_radius(&pp, centre.x, centre.y, fcx, fcy);
 	portal_frame_at(&pp, cover, t, &frame);
 
-	gs_enable_framebuffer_srgb(!nonlinear);
-
-	if (nonlinear) {
-		gs_effect_set_texture(portal->ep_a_tex, a);
-		gs_effect_set_texture(portal->ep_b_tex, b);
-		gs_effect_set_vec4(portal->ep_color_rim, &portal->rim_color);
-		gs_effect_set_vec4(portal->ep_color_core, &portal->core_color);
-	} else {
-		gs_effect_set_texture_srgb(portal->ep_a_tex, a);
-		gs_effect_set_texture_srgb(portal->ep_b_tex, b);
-		gs_effect_set_vec4(portal->ep_color_rim, &portal->rim_color_srgb);
-		gs_effect_set_vec4(portal->ep_color_core, &portal->core_color_srgb);
-	}
+	tc_frame_begin(&blend);
+	tc_set_texture(&blend, portal->ep_a_tex, a);
+	tc_set_texture(&blend, portal->ep_b_tex, b);
+	tc_set_color(&blend, portal->ep_color_rim, &portal->rim_color);
+	tc_set_color(&blend, portal->ep_color_core, &portal->core_color);
 
 	gs_effect_set_vec2(portal->ep_canvas, &canvas);
 	gs_effect_set_vec2(portal->ep_centre_px, &centre);
@@ -516,10 +481,10 @@ static void portal_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(portal->ep_swirl, portal->swirl);
 	gs_effect_set_float(portal->ep_intensity, portal->intensity);
 
-	while (gs_effect_loop(portal->effect, "Portal"))
+	while (gs_effect_loop(portal->base.effect, "Portal"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&blend);
 }
 
 static void portal_video_render(void *data, gs_effect_t *effect)
@@ -527,38 +492,7 @@ static void portal_video_render(void *data, gs_effect_t *effect)
 	struct portal_info *portal = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(portal->source, portal_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool portal_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-				size_t channels, size_t sample_rate)
-{
-	struct portal_info *portal = data;
-
-	return obs_transition_audio_render(portal->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space portal_video_get_color_space(void *data, size_t count,
-							const enum gs_color_space *preferred_spaces)
-{
-	struct portal_info *portal = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(portal->source);
+	obs_transition_video_render(portal->base.source, portal_callback);
 }
 
 struct obs_source_info portal_transition = {
@@ -569,8 +503,8 @@ struct obs_source_info portal_transition = {
 	.destroy = portal_destroy,
 	.update = portal_update,
 	.video_render = portal_video_render,
-	.audio_render = portal_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = portal_properties,
 	.get_defaults = portal_defaults,
-	.video_get_color_space = portal_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };

@@ -43,6 +43,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "matte-math.h"
 #include "matte-transition.h"
+#include "transition-common.h"
 
 /* clang-format off */
 
@@ -107,13 +108,6 @@ static const char *const echo_label[MATTE_ECHOES] = {
 	"Matte.EchoColor2",
 	"Matte.EchoColor3",
 	"Matte.EchoColor4",
-};
-
-static const char *const echo_param[MATTE_ECHOES] = {
-	"color_echo1",
-	"color_echo2",
-	"color_echo3",
-	"color_echo4",
 };
 
 enum matte_preset_id {
@@ -254,8 +248,7 @@ static const struct matte_preset matte_presets[] = {
 #define MATTE_PRESET_COUNT ((int)(sizeof(matte_presets) / sizeof(matte_presets[0])))
 
 struct matte_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -310,9 +303,9 @@ struct matte_info {
 	struct matte_bands bands;
 	float glow_amt;
 
-	struct vec4 border_color, border_color_srgb;
-	struct vec4 echo_color[MATTE_ECHOES], echo_color_srgb[MATTE_ECHOES];
-	struct vec4 glow_color, glow_color_srgb;
+	struct tc_color border_color;
+	struct tc_color echo_color[MATTE_ECHOES];
+	struct tc_color glow_color;
 
 	/* mask image - owned by the graphics thread once loaded */
 	struct dstr image_path;
@@ -328,15 +321,6 @@ struct matte_info {
 	uint32_t range_cx, range_cy;
 	float range_lo, range_hi;
 };
-
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
 
 static const char *matte_get_name(void *type_data)
 {
@@ -458,14 +442,6 @@ static void matte_load_image(struct matte_info *matte, const char *path)
 /* settings                                                           */
 /* ------------------------------------------------------------------ */
 
-static void color_pair(obs_data_t *settings, const char *name, struct vec4 *plain, struct vec4 *srgb)
-{
-	uint32_t color = (uint32_t)obs_data_get_int(settings, name) | 0xFF000000;
-
-	vec4_from_rgba(plain, color);
-	vec4_from_rgba_srgb(srgb, color);
-}
-
 static void matte_update(void *data, obs_data_t *settings)
 {
 	struct matte_info *matte = data;
@@ -526,10 +502,10 @@ static void matte_update(void *data, obs_data_t *settings)
 	matte->bands.glow = matte->glow_amt > 0.0f ? fmaxf((float)obs_data_get_double(settings, S_GLOW_WIDTH), 1.0f)
 						   : 0.0f;
 
-	color_pair(settings, S_BORDER_COLOR, &matte->border_color, &matte->border_color_srgb);
-	color_pair(settings, S_GLOW_COLOR, &matte->glow_color, &matte->glow_color_srgb);
+	tc_color_from_setting(&matte->border_color, settings, S_BORDER_COLOR);
+	tc_color_from_setting(&matte->glow_color, settings, S_GLOW_COLOR);
 	for (i = 0; i < MATTE_ECHOES; i++)
-		color_pair(settings, echo_setting[i], &matte->echo_color[i], &matte->echo_color_srgb[i]);
+		tc_color_from_setting(&matte->echo_color[i], settings, echo_setting[i]);
 
 	matte->range_valid = false;
 
@@ -545,66 +521,55 @@ static void matte_update(void *data, obs_data_t *settings)
 	}
 }
 
+/* clang-format off */
+
+static const struct tc_param matte_params[] = {
+	TC_PARAM(struct matte_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct matte_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct matte_info, ep_luma_tex, "luma_tex"),
+	TC_PARAM(struct matte_info, ep_profile_tex, "profile_tex"),
+	TC_PARAM(struct matte_info, ep_canvas, "canvas"),
+	TC_PARAM(struct matte_info, ep_origin_px, "origin_px"),
+	TC_PARAM(struct matte_info, ep_rot, "rot"),
+	TC_PARAM(struct matte_info, ep_inv_stretch, "inv_stretch"),
+	TC_PARAM(struct matte_info, ep_shape, "shape"),
+	TC_PARAM(struct matte_info, ep_star_n, "star_n"),
+	TC_PARAM(struct matte_info, ep_star_k, "star_k"),
+	TC_PARAM(struct matte_info, ep_arms, "arms"),
+	TC_PARAM(struct matte_info, ep_pitch, "pitch"),
+	TC_PARAM(struct matte_info, ep_amp, "amp"),
+	TC_PARAM(struct matte_info, ep_wavelen, "wavelen"),
+	TC_PARAM(struct matte_info, ep_lobes, "lobes"),
+	TC_PARAM(struct matte_info, ep_bar_px, "bar_px"),
+	TC_PARAM(struct matte_info, ep_phase, "phase"),
+	TC_PARAM(struct matte_info, ep_luma_scale, "luma_scale"),
+	TC_PARAM(struct matte_info, ep_front, "front"),
+	TC_PARAM(struct matte_info, ep_dir_sign, "dir_sign"),
+	TC_PARAM(struct matte_info, ep_feather, "feather"),
+	TC_PARAM(struct matte_info, ep_border, "border"),
+	TC_PARAM(struct matte_info, ep_echo, "echo"),
+	TC_PARAM(struct matte_info, ep_echo_count, "echo_count"),
+	TC_PARAM(struct matte_info, ep_band_end, "band_end"),
+	TC_PARAM(struct matte_info, ep_glow, "glow"),
+	TC_PARAM(struct matte_info, ep_glow_amt, "glow_amt"),
+	TC_PARAM(struct matte_info, ep_color_border, "color_border"),
+	TC_PARAM(struct matte_info, ep_color_glow, "color_glow"),
+	TC_PARAM(struct matte_info, ep_color_echo[0], "color_echo1"),
+	TC_PARAM(struct matte_info, ep_color_echo[1], "color_echo2"),
+	TC_PARAM(struct matte_info, ep_color_echo[2], "color_echo3"),
+	TC_PARAM(struct matte_info, ep_color_echo[3], "color_echo4"),
+};
+
+/* clang-format on */
+
 static void *matte_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct matte_info *matte;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/matte_transition.effect");
-	int i;
+	struct matte_info *matte = bzalloc(sizeof(struct matte_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/matte_transition.effect is missing");
+	if (!tc_base_init(&matte->base, source, "matte_transition.effect", matte_params, TC_COUNT(matte_params))) {
+		bfree(matte);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/matte_transition.effect");
-		return NULL;
-	}
-
-	matte = bzalloc(sizeof(struct matte_info));
-	matte->source = source;
-	matte->effect = effect;
-
-	matte->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	matte->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	matte->ep_luma_tex = gs_effect_get_param_by_name(effect, "luma_tex");
-	matte->ep_profile_tex = gs_effect_get_param_by_name(effect, "profile_tex");
-	matte->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	matte->ep_origin_px = gs_effect_get_param_by_name(effect, "origin_px");
-	matte->ep_rot = gs_effect_get_param_by_name(effect, "rot");
-	matte->ep_inv_stretch = gs_effect_get_param_by_name(effect, "inv_stretch");
-	matte->ep_shape = gs_effect_get_param_by_name(effect, "shape");
-	matte->ep_star_n = gs_effect_get_param_by_name(effect, "star_n");
-	matte->ep_star_k = gs_effect_get_param_by_name(effect, "star_k");
-	matte->ep_arms = gs_effect_get_param_by_name(effect, "arms");
-	matte->ep_pitch = gs_effect_get_param_by_name(effect, "pitch");
-	matte->ep_amp = gs_effect_get_param_by_name(effect, "amp");
-	matte->ep_wavelen = gs_effect_get_param_by_name(effect, "wavelen");
-	matte->ep_lobes = gs_effect_get_param_by_name(effect, "lobes");
-	matte->ep_bar_px = gs_effect_get_param_by_name(effect, "bar_px");
-	matte->ep_phase = gs_effect_get_param_by_name(effect, "phase");
-	matte->ep_luma_scale = gs_effect_get_param_by_name(effect, "luma_scale");
-	matte->ep_front = gs_effect_get_param_by_name(effect, "front");
-	matte->ep_dir_sign = gs_effect_get_param_by_name(effect, "dir_sign");
-	matte->ep_feather = gs_effect_get_param_by_name(effect, "feather");
-	matte->ep_border = gs_effect_get_param_by_name(effect, "border");
-	matte->ep_echo = gs_effect_get_param_by_name(effect, "echo");
-	matte->ep_echo_count = gs_effect_get_param_by_name(effect, "echo_count");
-	matte->ep_band_end = gs_effect_get_param_by_name(effect, "band_end");
-	matte->ep_glow = gs_effect_get_param_by_name(effect, "glow");
-	matte->ep_glow_amt = gs_effect_get_param_by_name(effect, "glow_amt");
-	matte->ep_color_border = gs_effect_get_param_by_name(effect, "color_border");
-	matte->ep_color_glow = gs_effect_get_param_by_name(effect, "color_glow");
-
-	for (i = 0; i < MATTE_ECHOES; i++)
-		matte->ep_color_echo[i] = gs_effect_get_param_by_name(effect, echo_param[i]);
 
 	dstr_init(&matte->image_path);
 
@@ -620,11 +585,11 @@ static void matte_destroy(void *data)
 	struct matte_info *matte = data;
 
 	obs_enter_graphics();
-	gs_effect_destroy(matte->effect);
 	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 	obs_leave_graphics();
 
+	tc_base_free(&matte->base);
 	dstr_free(&matte->image_path);
 	bfree(matte);
 }
@@ -1052,8 +1017,7 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	float luma_scale = MATTE_LUMA_SPAN * fcy;
 	float u, front, angle;
 
-	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
+	struct tc_frame blend;
 	int i;
 
 	matte_frame_for(matte, shape, fcx, fcy, &frame);
@@ -1082,23 +1046,13 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	vec2_set(&rot, cosf(angle), sinf(angle));
 	vec2_set(&inv_stretch, 1.0f / frame.stretch_x, 1.0f / frame.stretch_y);
 
-	gs_enable_framebuffer_srgb(!nonlinear);
-
-	if (nonlinear) {
-		gs_effect_set_texture(matte->ep_a_tex, a);
-		gs_effect_set_texture(matte->ep_b_tex, b);
-		gs_effect_set_vec4(matte->ep_color_border, &matte->border_color);
-		gs_effect_set_vec4(matte->ep_color_glow, &matte->glow_color);
-		for (i = 0; i < MATTE_ECHOES; i++)
-			gs_effect_set_vec4(matte->ep_color_echo[i], &matte->echo_color[i]);
-	} else {
-		gs_effect_set_texture_srgb(matte->ep_a_tex, a);
-		gs_effect_set_texture_srgb(matte->ep_b_tex, b);
-		gs_effect_set_vec4(matte->ep_color_border, &matte->border_color_srgb);
-		gs_effect_set_vec4(matte->ep_color_glow, &matte->glow_color_srgb);
-		for (i = 0; i < MATTE_ECHOES; i++)
-			gs_effect_set_vec4(matte->ep_color_echo[i], &matte->echo_color_srgb[i]);
-	}
+	tc_frame_begin(&blend);
+	tc_set_texture(&blend, matte->ep_a_tex, a);
+	tc_set_texture(&blend, matte->ep_b_tex, b);
+	tc_set_color(&blend, matte->ep_color_border, &matte->border_color);
+	tc_set_color(&blend, matte->ep_color_glow, &matte->glow_color);
+	for (i = 0; i < MATTE_ECHOES; i++)
+		tc_set_color(&blend, matte->ep_color_echo[i], &matte->echo_color[i]);
 
 	/* the mask is an ordering, not a picture, so it is read as stored */
 	gs_effect_set_texture(matte->ep_luma_tex, matte->have_image ? matte->image.texture : NULL);
@@ -1131,10 +1085,10 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	gs_effect_set_float(matte->ep_glow, matte->bands.glow);
 	gs_effect_set_float(matte->ep_glow_amt, matte->glow_amt);
 
-	while (gs_effect_loop(matte->effect, "Matte"))
+	while (gs_effect_loop(matte->base.effect, "Matte"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&blend);
 }
 
 static void matte_video_render(void *data, gs_effect_t *effect)
@@ -1142,38 +1096,7 @@ static void matte_video_render(void *data, gs_effect_t *effect)
 	struct matte_info *matte = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(matte->source, matte_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool matte_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-			       size_t channels, size_t sample_rate)
-{
-	struct matte_info *matte = data;
-
-	return obs_transition_audio_render(matte->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space matte_video_get_color_space(void *data, size_t count,
-						       const enum gs_color_space *preferred_spaces)
-{
-	struct matte_info *matte = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(matte->source);
+	obs_transition_video_render(matte->base.source, matte_callback);
 }
 
 struct obs_source_info matte_transition = {
@@ -1184,8 +1107,8 @@ struct obs_source_info matte_transition = {
 	.destroy = matte_destroy,
 	.update = matte_update,
 	.video_render = matte_video_render,
-	.audio_render = matte_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = matte_properties,
 	.get_defaults = matte_defaults,
-	.video_get_color_space = matte_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };

@@ -24,7 +24,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * really open in the hold, with the incoming scene inside it and the outgoing
  * one outside.
  *
- * Needs a graphics device, so it is not part of the ctest suite:
+ * Needs a graphics device, so ctest runs it under the "gpu" label. Build with
+ * -DENABLE_GPU_TESTS=ON; on a headless machine, `xvfb-run -a ctest -L gpu`, or
+ * on its own against the effect file:
  *
  *     xvfb-run -a ./portal-check ../data/effects/portal_transition.effect
  *

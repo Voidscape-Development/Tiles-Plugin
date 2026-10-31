@@ -37,8 +37,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * exactly - no seams between shards, no rim light, no tint - and the final
  * frame has to be the incoming scene the same way.
  *
- * Needs a graphics device, so it is not part of the ctest suite. Build with
- * -DENABLE_GPU_TESTS=ON and run it against the effect file:
+ * Needs a graphics device, so ctest runs it under the "gpu" label. Build with
+ * -DENABLE_GPU_TESTS=ON; on a headless machine, `xvfb-run -a ctest -L gpu`, or
+ * on its own against the effect file:
  *
  *     xvfb-run -a ./glass-check ../data/effects/glass_transition.effect
  *

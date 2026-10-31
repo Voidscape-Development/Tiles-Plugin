@@ -52,6 +52,8 @@ target_sources(
     src/portal-transition.h
     src/tiles-transition.c
     src/tiles-transition.h
+    src/transition-common.c
+    src/transition-common.h
     src/vortex-transition.c
     src/vortex-transition.h
 )
@@ -147,6 +149,22 @@ if(ENABLE_GPU_TESTS)
       target_compile_definitions(${check}-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
     endif()
   endforeach()
+
+  # Loads the plugin module itself and drives each transition through libobs,
+  # so it runs the plugin's own code between the settings and the effects.
+  add_executable(plugin-check test/plugin-check.c)
+  target_link_libraries(plugin-check PRIVATE OBS::libobs)
+  if(APPLE)
+    target_compile_definitions(plugin-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-opengl.dylib")
+  elseif(WIN32)
+    target_compile_definitions(plugin-check PRIVATE GPU_CHECK_GRAPHICS_MODULE="libobs-d3d11.dll")
+  endif()
+  add_dependencies(plugin-check ${CMAKE_PROJECT_NAME})
+  add_test(
+    NAME plugin-check
+    COMMAND plugin-check "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>" "${CMAKE_CURRENT_SOURCE_DIR}/data"
+  )
+  set_tests_properties(plugin-check PROPERTIES LABELS gpu)
 
   foreach(check IN ITEMS gpu:tiles glass:glass matte:matte portal:portal)
     string(REPLACE ":" ";" check "${check}")

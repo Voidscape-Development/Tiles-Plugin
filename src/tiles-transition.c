@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <math.h>
 
 #include "tiles-transition.h"
+#include "transition-common.h"
 
 /* clang-format off */
 
@@ -85,8 +86,7 @@ enum tiles_easing {
 };
 
 struct tiles_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -127,24 +127,13 @@ struct tiles_info {
 	float randomness;
 	float variation;
 
-	struct vec4 color_a;
-	struct vec4 color_a_srgb;
-	struct vec4 color_b;
-	struct vec4 color_b_srgb;
+	struct tc_color color_a;
+	struct tc_color color_b;
 
 	bool invert;
 	bool reverse_exit;
 	bool b_tiles;
 };
-
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
 
 static const char *tiles_get_name(void *type_data)
 {
@@ -155,7 +144,6 @@ static const char *tiles_get_name(void *type_data)
 static void tiles_update(void *data, obs_data_t *settings)
 {
 	struct tiles_info *tiles = data;
-	uint32_t color;
 
 	/* S_TILE_DURATION used to be called "stagger". Carry a saved value over
 	 * so scenes tuned before the rename keep their timing. */
@@ -184,67 +172,51 @@ static void tiles_update(void *data, obs_data_t *settings)
 	tiles->reverse_exit = obs_data_get_bool(settings, S_REVERSE_EXIT);
 	tiles->b_tiles = obs_data_get_bool(settings, S_B_TILES);
 
-	color = (uint32_t)obs_data_get_int(settings, S_COLOR) | 0xFF000000;
-	vec4_from_rgba(&tiles->color_a, color);
-	vec4_from_rgba_srgb(&tiles->color_a_srgb, color);
-
-	color = (uint32_t)obs_data_get_int(settings, S_COLOR_END) | 0xFF000000;
-	vec4_from_rgba(&tiles->color_b, color);
-	vec4_from_rgba_srgb(&tiles->color_b_srgb, color);
+	tc_color_from_setting(&tiles->color_a, settings, S_COLOR);
+	tc_color_from_setting(&tiles->color_b, settings, S_COLOR_END);
 
 	tiles->tile_px = clampf(tiles->tile_px, 4.0f, 4096.0f);
 	tiles->tile_duration = clampf(tiles->tile_duration, 0.01f, 1.0f);
 }
 
+/* clang-format off */
+
+static const struct tc_param tiles_params[] = {
+	TC_PARAM(struct tiles_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct tiles_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct tiles_info, ep_canvas, "canvas"),
+	TC_PARAM(struct tiles_info, ep_origin_px, "origin_px"),
+	TC_PARAM(struct tiles_info, ep_grid_rot, "grid_rot"),
+	TC_PARAM(struct tiles_info, ep_dir_vec, "dir_vec"),
+	TC_PARAM(struct tiles_info, ep_dir_range, "dir_range"),
+	TC_PARAM(struct tiles_info, ep_color_a, "color_a"),
+	TC_PARAM(struct tiles_info, ep_color_b, "color_b"),
+	TC_PARAM(struct tiles_info, ep_progress, "progress"),
+	TC_PARAM(struct tiles_info, ep_tile_px, "tile_px"),
+	TC_PARAM(struct tiles_info, ep_edge, "edge"),
+	TC_PARAM(struct tiles_info, ep_tile_dur, "tile_dur"),
+	TC_PARAM(struct tiles_info, ep_band, "band"),
+	TC_PARAM(struct tiles_info, ep_randomness, "randomness"),
+	TC_PARAM(struct tiles_info, ep_variation, "variation"),
+	TC_PARAM(struct tiles_info, ep_easing, "easing"),
+	TC_PARAM(struct tiles_info, ep_mode, "mode"),
+	TC_PARAM(struct tiles_info, ep_shape, "shape"),
+	TC_PARAM(struct tiles_info, ep_direction, "direction"),
+	TC_PARAM(struct tiles_info, ep_invert, "invert"),
+	TC_PARAM(struct tiles_info, ep_reverse_exit, "reverse_exit"),
+	TC_PARAM(struct tiles_info, ep_b_tiles, "b_tiles"),
+};
+
+/* clang-format on */
+
 static void *tiles_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct tiles_info *tiles;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/tiles_transition.effect");
+	struct tiles_info *tiles = bzalloc(sizeof(struct tiles_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/tiles_transition.effect is missing");
+	if (!tc_base_init(&tiles->base, source, "tiles_transition.effect", tiles_params, TC_COUNT(tiles_params))) {
+		bfree(tiles);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/tiles_transition.effect");
-		return NULL;
-	}
-
-	tiles = bzalloc(sizeof(struct tiles_info));
-	tiles->source = source;
-	tiles->effect = effect;
-
-	tiles->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	tiles->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	tiles->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	tiles->ep_origin_px = gs_effect_get_param_by_name(effect, "origin_px");
-	tiles->ep_grid_rot = gs_effect_get_param_by_name(effect, "grid_rot");
-	tiles->ep_dir_vec = gs_effect_get_param_by_name(effect, "dir_vec");
-	tiles->ep_dir_range = gs_effect_get_param_by_name(effect, "dir_range");
-	tiles->ep_color_a = gs_effect_get_param_by_name(effect, "color_a");
-	tiles->ep_color_b = gs_effect_get_param_by_name(effect, "color_b");
-	tiles->ep_progress = gs_effect_get_param_by_name(effect, "progress");
-	tiles->ep_tile_px = gs_effect_get_param_by_name(effect, "tile_px");
-	tiles->ep_edge = gs_effect_get_param_by_name(effect, "edge");
-	tiles->ep_tile_dur = gs_effect_get_param_by_name(effect, "tile_dur");
-	tiles->ep_band = gs_effect_get_param_by_name(effect, "band");
-	tiles->ep_randomness = gs_effect_get_param_by_name(effect, "randomness");
-	tiles->ep_variation = gs_effect_get_param_by_name(effect, "variation");
-	tiles->ep_easing = gs_effect_get_param_by_name(effect, "easing");
-	tiles->ep_mode = gs_effect_get_param_by_name(effect, "mode");
-	tiles->ep_shape = gs_effect_get_param_by_name(effect, "shape");
-	tiles->ep_direction = gs_effect_get_param_by_name(effect, "direction");
-	tiles->ep_invert = gs_effect_get_param_by_name(effect, "invert");
-	tiles->ep_reverse_exit = gs_effect_get_param_by_name(effect, "reverse_exit");
-	tiles->ep_b_tiles = gs_effect_get_param_by_name(effect, "b_tiles");
 
 	/* Apply the settings directly rather than through obs_source_update: the
 	 * source's data pointer is only assigned once create returns, so an
@@ -259,10 +231,7 @@ static void tiles_destroy(void *data)
 {
 	struct tiles_info *tiles = data;
 
-	obs_enter_graphics();
-	gs_effect_destroy(tiles->effect);
-	obs_leave_graphics();
-
+	tc_base_free(&tiles->base);
 	bfree(tiles);
 }
 
@@ -510,8 +479,7 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	struct vec2 range;
 	float band;
 	float tile_dur = tiles->tile_duration;
-	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
+	struct tc_frame frame;
 
 	vec2_set(&canvas, (float)cx, (float)cy);
 	vec2_set(&origin, tiles->origin_x * (float)cx, tiles->origin_y * (float)cy);
@@ -531,19 +499,11 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 		}
 	}
 
-	gs_enable_framebuffer_srgb(!nonlinear);
-
-	if (nonlinear) {
-		gs_effect_set_texture(tiles->ep_a_tex, a);
-		gs_effect_set_texture(tiles->ep_b_tex, b);
-		gs_effect_set_vec4(tiles->ep_color_a, &tiles->color_a);
-		gs_effect_set_vec4(tiles->ep_color_b, &tiles->color_b);
-	} else {
-		gs_effect_set_texture_srgb(tiles->ep_a_tex, a);
-		gs_effect_set_texture_srgb(tiles->ep_b_tex, b);
-		gs_effect_set_vec4(tiles->ep_color_a, &tiles->color_a_srgb);
-		gs_effect_set_vec4(tiles->ep_color_b, &tiles->color_b_srgb);
-	}
+	tc_frame_begin(&frame);
+	tc_set_texture(&frame, tiles->ep_a_tex, a);
+	tc_set_texture(&frame, tiles->ep_b_tex, b);
+	tc_set_color(&frame, tiles->ep_color_a, &tiles->color_a);
+	tc_set_color(&frame, tiles->ep_color_b, &tiles->color_b);
 
 	gs_effect_set_vec2(tiles->ep_canvas, &canvas);
 	gs_effect_set_vec2(tiles->ep_origin_px, &origin);
@@ -570,10 +530,10 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	gs_effect_set_bool(tiles->ep_reverse_exit, tiles->reverse_exit);
 	gs_effect_set_bool(tiles->ep_b_tiles, tiles->b_tiles);
 
-	while (gs_effect_loop(tiles->effect, "Tiles"))
+	while (gs_effect_loop(tiles->base.effect, "Tiles"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&frame);
 }
 
 static void tiles_video_render(void *data, gs_effect_t *effect)
@@ -581,38 +541,7 @@ static void tiles_video_render(void *data, gs_effect_t *effect)
 	struct tiles_info *tiles = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(tiles->source, tiles_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool tiles_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-			       size_t channels, size_t sample_rate)
-{
-	struct tiles_info *tiles = data;
-
-	return obs_transition_audio_render(tiles->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space tiles_video_get_color_space(void *data, size_t count,
-						       const enum gs_color_space *preferred_spaces)
-{
-	struct tiles_info *tiles = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(tiles->source);
+	obs_transition_video_render(tiles->base.source, tiles_callback);
 }
 
 struct obs_source_info tiles_transition = {
@@ -623,8 +552,8 @@ struct obs_source_info tiles_transition = {
 	.destroy = tiles_destroy,
 	.update = tiles_update,
 	.video_render = tiles_video_render,
-	.audio_render = tiles_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = tiles_properties,
 	.get_defaults = tiles_defaults,
-	.video_get_color_space = tiles_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };

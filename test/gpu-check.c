@@ -24,8 +24,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * green, so those three colours and blends between them are the only things
  * that may appear. A black pixel means a gap, a NaN or an undefined sample.
  *
- * Needs a graphics device, so it is not part of the ctest suite. Build with
- * -DENABLE_GPU_TESTS=ON and run it against the effect file:
+ * Needs a graphics device, so ctest runs it under the "gpu" label. Build with
+ * -DENABLE_GPU_TESTS=ON; on a headless machine, `xvfb-run -a ctest -L gpu`, or
+ * on its own against the effect file:
  *
  *     xvfb-run -a ./gpu-check ../data/effects/tiles_transition.effect
  *

@@ -44,6 +44,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "glass-mesh.h"
 #include "glass-transition.h"
+#include "transition-common.h"
 
 /* clang-format off */
 
@@ -155,8 +156,7 @@ static const struct glass_preset glass_presets[] = {
 #define GLASS_PRESET_COUNT ((int)(sizeof(glass_presets) / sizeof(glass_presets[0])))
 
 struct glass_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -213,8 +213,7 @@ struct glass_info {
 	float tint;
 	float glint;
 
-	struct vec4 crack_color;
-	struct vec4 crack_color_srgb;
+	struct tc_color crack_color;
 
 	/* mesh */
 	struct glass_field field;
@@ -229,15 +228,6 @@ struct glass_info {
 	bool warned; /* the mesh failed and has already been complained about */
 };
 
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
-
 static const char *glass_get_name(void *type_data)
 {
 	UNUSED_PARAMETER(type_data);
@@ -251,7 +241,6 @@ static const char *glass_get_name(void *type_data)
 static void glass_update(void *data, obs_data_t *settings)
 {
 	struct glass_info *glass = data;
-	uint32_t color;
 	float angle;
 	float hold;
 
@@ -293,9 +282,7 @@ static void glass_update(void *data, obs_data_t *settings)
 	glass->tint = (float)obs_data_get_double(settings, S_TINT) / 100.0f;
 	glass->glint = (float)obs_data_get_double(settings, S_GLINT) / 100.0f;
 
-	color = (uint32_t)obs_data_get_int(settings, S_CRACK_COLOR) | 0xFF000000;
-	vec4_from_rgba(&glass->crack_color, color);
-	vec4_from_rgba_srgb(&glass->crack_color_srgb, color);
+	tc_color_from_setting(&glass->crack_color, settings, S_CRACK_COLOR);
 }
 
 static void glass_defaults(obs_data_t *settings)
@@ -724,61 +711,50 @@ static void glass_mesh_build(struct glass_info *glass, uint32_t cx, uint32_t cy)
 /* render                                                             */
 /* ------------------------------------------------------------------ */
 
+/* clang-format off */
+
+static const struct tc_param glass_params[] = {
+	TC_PARAM(struct glass_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct glass_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct glass_info, ep_canvas, "canvas"),
+	TC_PARAM(struct glass_info, ep_impact_px, "impact_px"),
+	TC_PARAM(struct glass_info, ep_reach, "reach"),
+	TC_PARAM(struct glass_info, ep_progress, "progress"),
+	TC_PARAM(struct glass_info, ep_hold_end, "hold_end"),
+	TC_PARAM(struct glass_info, ep_crack_front, "crack_front"),
+	TC_PARAM(struct glass_info, ep_style, "style"),
+	TC_PARAM(struct glass_info, ep_flat, "flat_shards"),
+	TC_PARAM(struct glass_info, ep_arriving, "arriving"),
+	TC_PARAM(struct glass_info, ep_use_b, "use_b"),
+	TC_PARAM(struct glass_info, ep_gravity_dir, "gravity_dir"),
+	TC_PARAM(struct glass_info, ep_gravity, "gravity"),
+	TC_PARAM(struct glass_info, ep_throw, "throw_amt"),
+	TC_PARAM(struct glass_info, ep_spin, "spin"),
+	TC_PARAM(struct glass_info, ep_scatter, "scatter"),
+	TC_PARAM(struct glass_info, ep_focal, "focal"),
+	TC_PARAM(struct glass_info, ep_crack_color, "crack_color"),
+	TC_PARAM(struct glass_info, ep_crack_px, "crack_px"),
+	TC_PARAM(struct glass_info, ep_crack_glow, "crack_glow"),
+	TC_PARAM(struct glass_info, ep_rim_amount, "rim_amount"),
+	TC_PARAM(struct glass_info, ep_rim_px, "rim_px"),
+	TC_PARAM(struct glass_info, ep_refract_px, "refract_px"),
+	TC_PARAM(struct glass_info, ep_tint, "tint_amount"),
+	TC_PARAM(struct glass_info, ep_glint, "glint_amount"),
+	TC_PARAM(struct glass_info, ep_glint_pos, "glint_pos"),
+	TC_PARAM(struct glass_info, ep_glint_dir, "glint_dir"),
+	TC_PARAM(struct glass_info, ep_bg_level, "bg_level"),
+};
+
+/* clang-format on */
+
 static void *glass_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct glass_info *glass;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/glass_transition.effect");
+	struct glass_info *glass = bzalloc(sizeof(struct glass_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/glass_transition.effect is missing");
+	if (!tc_base_init(&glass->base, source, "glass_transition.effect", glass_params, TC_COUNT(glass_params))) {
+		bfree(glass);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/glass_transition.effect");
-		return NULL;
-	}
-
-	glass = bzalloc(sizeof(struct glass_info));
-	glass->source = source;
-	glass->effect = effect;
-
-	glass->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	glass->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	glass->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	glass->ep_impact_px = gs_effect_get_param_by_name(effect, "impact_px");
-	glass->ep_reach = gs_effect_get_param_by_name(effect, "reach");
-	glass->ep_progress = gs_effect_get_param_by_name(effect, "progress");
-	glass->ep_hold_end = gs_effect_get_param_by_name(effect, "hold_end");
-	glass->ep_crack_front = gs_effect_get_param_by_name(effect, "crack_front");
-	glass->ep_style = gs_effect_get_param_by_name(effect, "style");
-	glass->ep_flat = gs_effect_get_param_by_name(effect, "flat_shards");
-	glass->ep_arriving = gs_effect_get_param_by_name(effect, "arriving");
-	glass->ep_use_b = gs_effect_get_param_by_name(effect, "use_b");
-	glass->ep_gravity_dir = gs_effect_get_param_by_name(effect, "gravity_dir");
-	glass->ep_gravity = gs_effect_get_param_by_name(effect, "gravity");
-	glass->ep_throw = gs_effect_get_param_by_name(effect, "throw_amt");
-	glass->ep_spin = gs_effect_get_param_by_name(effect, "spin");
-	glass->ep_scatter = gs_effect_get_param_by_name(effect, "scatter");
-	glass->ep_focal = gs_effect_get_param_by_name(effect, "focal");
-	glass->ep_crack_color = gs_effect_get_param_by_name(effect, "crack_color");
-	glass->ep_crack_px = gs_effect_get_param_by_name(effect, "crack_px");
-	glass->ep_crack_glow = gs_effect_get_param_by_name(effect, "crack_glow");
-	glass->ep_rim_amount = gs_effect_get_param_by_name(effect, "rim_amount");
-	glass->ep_rim_px = gs_effect_get_param_by_name(effect, "rim_px");
-	glass->ep_refract_px = gs_effect_get_param_by_name(effect, "refract_px");
-	glass->ep_tint = gs_effect_get_param_by_name(effect, "tint_amount");
-	glass->ep_glint = gs_effect_get_param_by_name(effect, "glint_amount");
-	glass->ep_glint_pos = gs_effect_get_param_by_name(effect, "glint_pos");
-	glass->ep_glint_dir = gs_effect_get_param_by_name(effect, "glint_dir");
-	glass->ep_bg_level = gs_effect_get_param_by_name(effect, "bg_level");
 
 	/* Applied directly for the same reason the other transitions do it:
 	 * the source's data pointer is only assigned once create returns, so an
@@ -794,9 +770,9 @@ static void glass_destroy(void *data)
 
 	obs_enter_graphics();
 	glass_mesh_free(glass);
-	gs_effect_destroy(glass->effect);
 	obs_leave_graphics();
 
+	tc_base_free(&glass->base);
 	bfree(glass);
 }
 
@@ -814,7 +790,7 @@ struct glass_frame {
 	float glint_pos;
 	float focal;
 	float bg_level;
-	bool nonlinear;
+	struct tc_frame blend;
 };
 
 /*
@@ -829,15 +805,9 @@ struct glass_frame {
  */
 static void glass_set_uniforms(struct glass_info *glass, const struct glass_frame *f, bool arriving, bool use_b)
 {
-	if (f->nonlinear) {
-		gs_effect_set_texture(glass->ep_a_tex, f->a);
-		gs_effect_set_texture(glass->ep_b_tex, f->b);
-		gs_effect_set_vec4(glass->ep_crack_color, &glass->crack_color);
-	} else {
-		gs_effect_set_texture_srgb(glass->ep_a_tex, f->a);
-		gs_effect_set_texture_srgb(glass->ep_b_tex, f->b);
-		gs_effect_set_vec4(glass->ep_crack_color, &glass->crack_color_srgb);
-	}
+	tc_set_texture(&f->blend, glass->ep_a_tex, f->a);
+	tc_set_texture(&f->blend, glass->ep_b_tex, f->b);
+	tc_set_color(&f->blend, glass->ep_crack_color, &glass->crack_color);
 
 	gs_effect_set_vec2(glass->ep_canvas, &f->canvas);
 	gs_effect_set_vec2(glass->ep_impact_px, &f->impact);
@@ -914,7 +884,7 @@ static void glass_draw_pass(struct glass_info *glass, const struct glass_frame *
 	glass_order_pass(glass, motion, depth_varies);
 	glass_set_uniforms(glass, frame, arriving, use_b);
 
-	while (gs_effect_loop(glass->effect, "Glass")) {
+	while (gs_effect_loop(glass->base.effect, "Glass")) {
 		gs_load_vertexbuffer(glass->vb);
 		gs_load_indexbuffer(glass->ib);
 		gs_draw(GS_TRIS, 0, 0);
@@ -928,7 +898,6 @@ static void glass_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	struct glass_frame frame;
 	bool assemble = glass->style == GLASS_STYLE_ASSEMBLE;
 	bool depth_varies = !glass->flat && glass->style != GLASS_STYLE_WIPE;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
 	enum gs_cull_mode previous_cull = gs_get_cull_mode();
 
 	glass_mesh_build(glass, cx, cy);
@@ -939,7 +908,6 @@ static void glass_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	frame.a = a;
 	frame.b = b;
 	frame.progress = t;
-	frame.nonlinear = gs_get_color_space() == GS_CS_SRGB;
 	frame.focal = (float)cy * GLASS_FOCAL_HEIGHTS;
 	frame.bg_level = assemble ? GLASS_ASSEMBLE_BG : 1.0f;
 
@@ -975,7 +943,7 @@ static void glass_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	motion.impact_y = frame.impact.y;
 	motion.flat = glass->flat;
 
-	gs_enable_framebuffer_srgb(!frame.nonlinear);
+	tc_frame_begin(&frame.blend);
 
 	gs_blend_state_push();
 	gs_set_cull_mode(GS_NEITHER); /* a shard that turns over shows its back */
@@ -985,7 +953,7 @@ static void glass_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	 * shards are falling off, and the first thing in the target. */
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 	glass_set_uniforms(glass, &frame, false, false);
-	while (gs_effect_loop(glass->effect, "Background"))
+	while (gs_effect_loop(glass->base.effect, "Background"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
 	/* Shards fade rather than pop as they finish, so they need blending. */
@@ -1014,7 +982,7 @@ static void glass_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 
 	gs_set_cull_mode(previous_cull);
 	gs_blend_state_pop();
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&frame.blend);
 }
 
 static void glass_video_render(void *data, gs_effect_t *effect)
@@ -1022,38 +990,7 @@ static void glass_video_render(void *data, gs_effect_t *effect)
 	struct glass_info *glass = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(glass->source, glass_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool glass_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-			       size_t channels, size_t sample_rate)
-{
-	struct glass_info *glass = data;
-
-	return obs_transition_audio_render(glass->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space glass_video_get_color_space(void *data, size_t count,
-						       const enum gs_color_space *preferred_spaces)
-{
-	struct glass_info *glass = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(glass->source);
+	obs_transition_video_render(glass->base.source, glass_callback);
 }
 
 struct obs_source_info glass_transition = {
@@ -1064,8 +1001,8 @@ struct obs_source_info glass_transition = {
 	.destroy = glass_destroy,
 	.update = glass_update,
 	.video_render = glass_video_render,
-	.audio_render = glass_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = glass_properties,
 	.get_defaults = glass_defaults,
-	.video_get_color_space = glass_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };

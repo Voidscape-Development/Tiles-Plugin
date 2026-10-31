@@ -29,7 +29,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * the front's range with the mirror, so a mirror that drifted would cut the
  * transition short or leave it starting late.
  *
- * Needs a graphics device, so it is not part of the ctest suite:
+ * Needs a graphics device, so ctest runs it under the "gpu" label. Build with
+ * -DENABLE_GPU_TESTS=ON; on a headless machine, `xvfb-run -a ctest -L gpu`, or
+ * on its own against the effect file:
  *
  *     xvfb-run -a ./matte-check ../data/effects/matte_transition.effect
  *

@@ -36,6 +36,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <math.h>
 
+#include "transition-common.h"
 #include "vortex-transition.h"
 
 /* clang-format off */
@@ -100,10 +101,6 @@ enum vortex_color_mix {
 
 /* clang-format off */
 
-static const char *const body_param[VORTEX_BODY_COLORS] = {
-	"color_deep", "color_deep2", "color_deep3", "color_deep4",
-};
-
 static const char *const body_setting[VORTEX_BODY_COLORS] = {
 	S_COLOR_BODY, S_COLOR_BODY2, S_COLOR_BODY3, S_COLOR_BODY4,
 };
@@ -121,8 +118,7 @@ static const uint32_t body_default[VORTEX_BODY_COLORS] = {
 /* clang-format on */
 
 struct vortex_info {
-	obs_source_t *source;
-	gs_effect_t *effect;
+	struct transition_base base;
 
 	gs_eparam_t *ep_a_tex;
 	gs_eparam_t *ep_b_tex;
@@ -174,20 +170,9 @@ struct vortex_info {
 	float core_level;
 	float core_width;
 
-	struct vec4 color_bright;
-	struct vec4 color_bright_srgb;
-	struct vec4 body[VORTEX_BODY_COLORS];
-	struct vec4 body_srgb[VORTEX_BODY_COLORS];
+	struct tc_color color_bright;
+	struct tc_color body[VORTEX_BODY_COLORS];
 };
-
-static inline float clampf(float v, float lo, float hi)
-{
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
-}
 
 static const char *vortex_get_name(void *type_data)
 {
@@ -198,7 +183,6 @@ static const char *vortex_get_name(void *type_data)
 static void vortex_update(void *data, obs_data_t *settings)
 {
 	struct vortex_info *vortex = data;
-	uint32_t color;
 	float bleed;
 	float blend;
 	int count;
@@ -232,15 +216,10 @@ static void vortex_update(void *data, obs_data_t *settings)
 		vortex->warp_pull = 0.0f;
 	}
 
-	color = (uint32_t)obs_data_get_int(settings, S_COLOR_CORE) | 0xFF000000;
-	vec4_from_rgba(&vortex->color_bright, color);
-	vec4_from_rgba_srgb(&vortex->color_bright_srgb, color);
+	tc_color_from_setting(&vortex->color_bright, settings, S_COLOR_CORE);
 
-	for (i = 0; i < VORTEX_BODY_COLORS; i++) {
-		color = (uint32_t)obs_data_get_int(settings, body_setting[i]) | 0xFF000000;
-		vec4_from_rgba(&vortex->body[i], color);
-		vec4_from_rgba_srgb(&vortex->body_srgb[i], color);
-	}
+	for (i = 0; i < VORTEX_BODY_COLORS; i++)
+		tc_color_from_setting(&vortex->body[i], settings, body_setting[i]);
 
 	count = (int)obs_data_get_int(settings, S_COLOR_COUNT);
 	if (count < 1)
@@ -274,64 +253,53 @@ static void vortex_update(void *data, obs_data_t *settings)
 	vortex->smoke_soft = clampf(vortex->smoke_soft, 0.02f, 1.0f);
 }
 
+/* clang-format off */
+
+static const struct tc_param vortex_params[] = {
+	TC_PARAM(struct vortex_info, ep_a_tex, "a_tex"),
+	TC_PARAM(struct vortex_info, ep_b_tex, "b_tex"),
+	TC_PARAM(struct vortex_info, ep_canvas, "canvas"),
+	TC_PARAM(struct vortex_info, ep_origin_px, "origin_px"),
+	TC_PARAM(struct vortex_info, ep_unit_px, "unit_px"),
+	TC_PARAM(struct vortex_info, ep_reach, "reach"),
+	TC_PARAM(struct vortex_info, ep_progress, "progress"),
+	TC_PARAM(struct vortex_info, ep_open_end, "open_end"),
+	TC_PARAM(struct vortex_info, ep_reveal_start, "reveal_start"),
+	TC_PARAM(struct vortex_info, ep_cut, "cut"),
+	TC_PARAM(struct vortex_info, ep_iris_k, "iris_k"),
+	TC_PARAM(struct vortex_info, ep_reveal_k, "reveal_k"),
+	TC_PARAM(struct vortex_info, ep_glow, "glow"),
+	TC_PARAM(struct vortex_info, ep_arms, "arms"),
+	TC_PARAM(struct vortex_info, ep_twist, "twist"),
+	TC_PARAM(struct vortex_info, ep_spin, "spin"),
+	TC_PARAM(struct vortex_info, ep_detail, "detail"),
+	TC_PARAM(struct vortex_info, ep_fringe, "fringe"),
+	TC_PARAM(struct vortex_info, ep_intensity, "intensity"),
+	TC_PARAM(struct vortex_info, ep_smoke_scale, "smoke_scale"),
+	TC_PARAM(struct vortex_info, ep_smoke_soft, "smoke_soft"),
+	TC_PARAM(struct vortex_info, ep_swirl_angle, "swirl_angle"),
+	TC_PARAM(struct vortex_info, ep_swirl_pull, "swirl_pull"),
+	TC_PARAM(struct vortex_info, ep_color_bright, "color_bright"),
+	TC_PARAM(struct vortex_info, ep_body_span, "body_span"),
+	TC_PARAM(struct vortex_info, ep_color_mix, "color_mix"),
+	TC_PARAM(struct vortex_info, ep_core_level, "core_level"),
+	TC_PARAM(struct vortex_info, ep_core_width, "core_width"),
+	TC_PARAM(struct vortex_info, ep_body[0], "color_deep"),
+	TC_PARAM(struct vortex_info, ep_body[1], "color_deep2"),
+	TC_PARAM(struct vortex_info, ep_body[2], "color_deep3"),
+	TC_PARAM(struct vortex_info, ep_body[3], "color_deep4"),
+};
+
+/* clang-format on */
+
 static void *vortex_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct vortex_info *vortex;
-	gs_effect_t *effect;
-	char *file = obs_module_file("effects/vortex_transition.effect");
-	int i;
+	struct vortex_info *vortex = bzalloc(sizeof(struct vortex_info));
 
-	if (!file) {
-		obs_log(LOG_ERROR, "effects/vortex_transition.effect is missing");
+	if (!tc_base_init(&vortex->base, source, "vortex_transition.effect", vortex_params, TC_COUNT(vortex_params))) {
+		bfree(vortex);
 		return NULL;
 	}
-
-	obs_enter_graphics();
-	effect = gs_effect_create_from_file(file, NULL);
-	obs_leave_graphics();
-
-	bfree(file);
-
-	if (!effect) {
-		obs_log(LOG_ERROR, "failed to compile effects/vortex_transition.effect");
-		return NULL;
-	}
-
-	vortex = bzalloc(sizeof(struct vortex_info));
-	vortex->source = source;
-	vortex->effect = effect;
-
-	vortex->ep_a_tex = gs_effect_get_param_by_name(effect, "a_tex");
-	vortex->ep_b_tex = gs_effect_get_param_by_name(effect, "b_tex");
-	vortex->ep_canvas = gs_effect_get_param_by_name(effect, "canvas");
-	vortex->ep_origin_px = gs_effect_get_param_by_name(effect, "origin_px");
-	vortex->ep_unit_px = gs_effect_get_param_by_name(effect, "unit_px");
-	vortex->ep_reach = gs_effect_get_param_by_name(effect, "reach");
-	vortex->ep_progress = gs_effect_get_param_by_name(effect, "progress");
-	vortex->ep_open_end = gs_effect_get_param_by_name(effect, "open_end");
-	vortex->ep_reveal_start = gs_effect_get_param_by_name(effect, "reveal_start");
-	vortex->ep_cut = gs_effect_get_param_by_name(effect, "cut");
-	vortex->ep_iris_k = gs_effect_get_param_by_name(effect, "iris_k");
-	vortex->ep_reveal_k = gs_effect_get_param_by_name(effect, "reveal_k");
-	vortex->ep_glow = gs_effect_get_param_by_name(effect, "glow");
-	vortex->ep_arms = gs_effect_get_param_by_name(effect, "arms");
-	vortex->ep_twist = gs_effect_get_param_by_name(effect, "twist");
-	vortex->ep_spin = gs_effect_get_param_by_name(effect, "spin");
-	vortex->ep_detail = gs_effect_get_param_by_name(effect, "detail");
-	vortex->ep_fringe = gs_effect_get_param_by_name(effect, "fringe");
-	vortex->ep_intensity = gs_effect_get_param_by_name(effect, "intensity");
-	vortex->ep_smoke_scale = gs_effect_get_param_by_name(effect, "smoke_scale");
-	vortex->ep_smoke_soft = gs_effect_get_param_by_name(effect, "smoke_soft");
-	vortex->ep_swirl_angle = gs_effect_get_param_by_name(effect, "swirl_angle");
-	vortex->ep_swirl_pull = gs_effect_get_param_by_name(effect, "swirl_pull");
-	vortex->ep_color_bright = gs_effect_get_param_by_name(effect, "color_bright");
-	vortex->ep_body_span = gs_effect_get_param_by_name(effect, "body_span");
-	vortex->ep_color_mix = gs_effect_get_param_by_name(effect, "color_mix");
-	vortex->ep_core_level = gs_effect_get_param_by_name(effect, "core_level");
-	vortex->ep_core_width = gs_effect_get_param_by_name(effect, "core_width");
-
-	for (i = 0; i < VORTEX_BODY_COLORS; i++)
-		vortex->ep_body[i] = gs_effect_get_param_by_name(effect, body_param[i]);
 
 	/* Applied directly for the same reason the tiling transition does it: the
 	 * source's data pointer is only assigned once create returns, so an update
@@ -345,10 +313,7 @@ static void vortex_destroy(void *data)
 {
 	struct vortex_info *vortex = data;
 
-	obs_enter_graphics();
-	gs_effect_destroy(vortex->effect);
-	obs_leave_graphics();
-
+	tc_base_free(&vortex->base);
 	bfree(vortex);
 }
 
@@ -582,8 +547,7 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	 * opaque from edge to edge and the cut cannot show. */
 	float cut = (vortex->open_end + vortex->reveal_start) * 0.5f;
 
-	bool nonlinear = gs_get_color_space() == GS_CS_SRGB;
-	bool previous_srgb = gs_framebuffer_srgb_enabled();
+	struct tc_frame frame;
 	int i;
 
 	vec2_set(&canvas, (float)cx, (float)cy);
@@ -601,23 +565,13 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	reveal_k = clampf((t - vortex->reveal_start) / fmaxf(1.0f - vortex->reveal_start, 0.0001f), 0.0f, 1.0f);
 	vortex_swirl(vortex, t, cut, &swirl_angle, &swirl_pull);
 
-	gs_enable_framebuffer_srgb(!nonlinear);
+	tc_frame_begin(&frame);
+	tc_set_texture(&frame, vortex->ep_a_tex, a);
+	tc_set_texture(&frame, vortex->ep_b_tex, b);
+	tc_set_color(&frame, vortex->ep_color_bright, &vortex->color_bright);
 
-	if (nonlinear) {
-		gs_effect_set_texture(vortex->ep_a_tex, a);
-		gs_effect_set_texture(vortex->ep_b_tex, b);
-		gs_effect_set_vec4(vortex->ep_color_bright, &vortex->color_bright);
-
-		for (i = 0; i < VORTEX_BODY_COLORS; i++)
-			gs_effect_set_vec4(vortex->ep_body[i], &vortex->body[i]);
-	} else {
-		gs_effect_set_texture_srgb(vortex->ep_a_tex, a);
-		gs_effect_set_texture_srgb(vortex->ep_b_tex, b);
-		gs_effect_set_vec4(vortex->ep_color_bright, &vortex->color_bright_srgb);
-
-		for (i = 0; i < VORTEX_BODY_COLORS; i++)
-			gs_effect_set_vec4(vortex->ep_body[i], &vortex->body_srgb[i]);
-	}
+	for (i = 0; i < VORTEX_BODY_COLORS; i++)
+		tc_set_color(&frame, vortex->ep_body[i], &vortex->body[i]);
 
 	gs_effect_set_vec2(vortex->ep_canvas, &canvas);
 	gs_effect_set_vec2(vortex->ep_origin_px, &origin);
@@ -649,10 +603,10 @@ static void vortex_callback(void *data, gs_texture_t *a, gs_texture_t *b, float 
 	gs_effect_set_float(vortex->ep_core_level, vortex->core_level);
 	gs_effect_set_float(vortex->ep_core_width, vortex->core_width);
 
-	while (gs_effect_loop(vortex->effect, "Vortex"))
+	while (gs_effect_loop(vortex->base.effect, "Vortex"))
 		gs_draw_sprite(NULL, 0, cx, cy);
 
-	gs_enable_framebuffer_srgb(previous_srgb);
+	tc_frame_end(&frame);
 }
 
 static void vortex_video_render(void *data, gs_effect_t *effect)
@@ -660,38 +614,7 @@ static void vortex_video_render(void *data, gs_effect_t *effect)
 	struct vortex_info *vortex = data;
 
 	UNUSED_PARAMETER(effect);
-	obs_transition_video_render(vortex->source, vortex_callback);
-}
-
-static float mix_a(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return 1.0f - t;
-}
-
-static float mix_b(void *data, float t)
-{
-	UNUSED_PARAMETER(data);
-	return t;
-}
-
-static bool vortex_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers,
-				size_t channels, size_t sample_rate)
-{
-	struct vortex_info *vortex = data;
-
-	return obs_transition_audio_render(vortex->source, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
-}
-
-static enum gs_color_space vortex_video_get_color_space(void *data, size_t count,
-							const enum gs_color_space *preferred_spaces)
-{
-	struct vortex_info *vortex = data;
-
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-
-	return obs_transition_video_get_color_space(vortex->source);
+	obs_transition_video_render(vortex->base.source, vortex_callback);
 }
 
 struct obs_source_info vortex_transition = {
@@ -702,8 +625,8 @@ struct obs_source_info vortex_transition = {
 	.destroy = vortex_destroy,
 	.update = vortex_update,
 	.video_render = vortex_video_render,
-	.audio_render = vortex_audio_render,
+	.audio_render = tc_audio_render,
 	.get_properties = vortex_properties,
 	.get_defaults = vortex_defaults,
-	.video_get_color_space = vortex_video_get_color_space,
+	.video_get_color_space = tc_video_get_color_space,
 };
