@@ -30,7 +30,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  *
  *     xvfb-run -a ./gpu-check ../data/effects/tiles_transition.effect
  *
- * The uniform setup mirrors tiles_callback() in src/tiles-transition.c.
+ * The uniforms are worked out with src/tiles-math.c, as tiles_callback() in
+ * src/tiles-transition.c does.
  */
 #include <obs.h>
 #include <graphics/vec4.h>
@@ -43,11 +44,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <stdbool.h>
 
 #include "gpu-check-video.h"
+#include "tiles-math.h"
 
 #define CW 640
 #define CH 360
 
-#define SHAPE_COUNT 10
+#define SHAPE_COUNT TILES_SHAPE_COUNT
 
 static uint32_t px_a[CW * CH], px_b[CW * CH];
 static uint8_t out[CH][CW][4];
@@ -85,86 +87,27 @@ static gs_stagesurf_t *stage;
 
 #define P(n) gs_effect_get_param_by_name(eff, n)
 
-static float circumradius(int shape, float tile_px)
-{
-	switch (shape) {
-	case 0: /* square */
-	case 8: /* mosaic, whose largest cell is a whole square */
-		return tile_px * 0.7071068f;
-	case 4: /* diamond */
-		return tile_px * 0.8660254f;
-	case 5: /* brick */
-		return tile_px * 0.5590170f;
-	case 6: /* octagon */
-		return tile_px * 0.5411961f;
-	case 7: /* cairo */
-		return tile_px * 0.5176381f;
-	case 9: /* shatter */
-		return tile_px * 1.4f;
-	default:
-		return tile_px * 0.5773503f;
-	}
-}
-
-static float edge_width(int shape, float tile_px)
-{
-	if (shape == 1) /* circle */
-		return 1.7320508f / tile_px;
-	if (shape == 3) /* triangle */
-		return 3.4641016f / tile_px;
-	if (shape == 4) /* diamond */
-		return 2.3094011f / tile_px;
-	if (shape == 5) /* brick */
-		return 4.0f / tile_px;
-	if (shape == 7) /* cairo */
-		return 2.7320508f / tile_px;
-	return 2.0f / tile_px;
-}
-
 static void draw(int mode, int shape, int direction, float t, float angle_deg, float ox_pct, float oy_pct,
 		 float grid_deg, bool invert, bool reverse_exit, bool b_tiles)
 {
 	struct vec2 canvas, origin, grid_rot, dir, range;
 	struct vec4 green;
-	float tile_px = 64.0f, tile_dur = 0.35f, band, pad;
-	float angle = angle_deg * (float)M_PI / 180.0f;
-	float corner_x[4] = {0.0f, CW, 0.0f, CW}, corner_y[4] = {0.0f, 0.0f, CH, CH};
-	float max_radius = 0.0f, pmin = 0.0f, pmax = 0.0f;
+	float tile_px = 64.0f, tile_dur = 0.35f, band;
+	float dir_v[2], range_v[2];
 	uint8_t *data;
 	uint32_t linesize;
 
 	vec2_set(&canvas, CW, CH);
 	vec2_set(&origin, ox_pct / 100.0f * CW, oy_pct / 100.0f * CH);
 	vec2_set(&grid_rot, cosf(grid_deg * (float)M_PI / 180.0f), sinf(grid_deg * (float)M_PI / 180.0f));
-	vec2_set(&dir, cosf(angle), sinf(angle));
-	pad = circumradius(shape, tile_px);
-
-	for (int i = 0; i < 4; i++) {
-		float dx = corner_x[i] - origin.x, dy = corner_y[i] - origin.y;
-		float rad = sqrtf(dx * dx + dy * dy), proj = dx * dir.x + dy * dir.y;
-		if (rad > max_radius)
-			max_radius = rad;
-		if (i == 0 || proj < pmin)
-			pmin = proj;
-		if (i == 0 || proj > pmax)
-			pmax = proj;
-	}
-
-	if (direction == 4)
-		vec2_set(&range, pmin - pad, fmaxf(pmax - pmin + 2.0f * pad, 1.0f));
-	else if (direction == 2 || direction == 3)
-		vec2_set(&range, 0.0f, fmaxf(fmaxf(fabsf(pmin), fabsf(pmax)) + pad, 1.0f));
-	else
-		vec2_set(&range, 0.0f, fmaxf(max_radius + pad, 1.0f));
+	tiles_sweep_extent(direction, angle_deg * (float)M_PI / 180.0f, origin.x, origin.y, CW, CH,
+			   tiles_circumradius(shape, tile_px), dir_v, range_v);
+	vec2_set(&dir, dir_v[0], dir_v[1]);
+	vec2_set(&range, range_v[0], range_v[1]);
 
 	band = 240.0f / range.y;
-	if (mode == 2) {
-		float total = 2.0f * tile_dur + band;
-		if (total > 0.95f) {
-			tile_dur *= 0.95f / total;
-			band *= 0.95f / total;
-		}
-	}
+	if (mode == TILES_MODE_WAVE)
+		tiles_wave_fit(&tile_dur, &band);
 
 	vec4_from_rgba(&green, 0xFF00FF00);
 
@@ -188,7 +131,7 @@ static void draw(int mode, int shape, int direction, float t, float angle_deg, f
 	gs_effect_set_vec4(P("color_b"), &green);
 	gs_effect_set_float(P("progress"), t);
 	gs_effect_set_float(P("tile_px"), tile_px);
-	gs_effect_set_float(P("edge"), edge_width(shape, tile_px));
+	gs_effect_set_float(P("edge"), tiles_edge_width(shape, tile_px));
 	gs_effect_set_float(P("tile_dur"), tile_dur);
 	gs_effect_set_float(P("band"), band);
 	gs_effect_set_float(P("randomness"), 0.0f);

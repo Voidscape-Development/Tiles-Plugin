@@ -52,6 +52,8 @@ target_sources(
     src/portal-transition.h
     src/presets.c
     src/presets.h
+    src/tiles-math.c
+    src/tiles-math.h
     src/tiles-transition.c
     src/tiles-transition.h
     src/transition-common.c
@@ -69,11 +71,21 @@ option(ENABLE_GPU_TESTS "Build the effect check that renders on a real graphics 
 
 if(ENABLE_TESTS)
   enable_testing()
-  add_executable(test-tiling test/test-tiling.c)
-  if(NOT MSVC)
-    target_link_libraries(test-tiling PRIVATE m)
-  endif()
-  add_test(NAME test-tiling COMMAND test-tiling)
+  # Tests that compile an effect's *_math.effect as C++, through test/hlsl.hpp,
+  # so they check the code the shader runs rather than a copy of it. HLSL
+  # literals are single precision, and with GCC so are these.
+  function(add_shader_test name)
+    add_executable(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE src test data/effects)
+    target_compile_features(${name} PRIVATE cxx_std_17)
+    target_compile_options(${name} PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-fsingle-precision-constant>)
+    if(NOT MSVC)
+      target_link_libraries(${name} PRIVATE m)
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+  endfunction()
+
+  add_shader_test(test-tiling test/test-tiling.cpp src/tiles-math.c)
 
   add_executable(test-vortex test/test-vortex.c)
   if(NOT MSVC)
@@ -111,8 +123,9 @@ endif()
 # xvfb-run: `xvfb-run -a ctest -L gpu`.
 if(ENABLE_GPU_TESTS)
   enable_testing()
-  add_executable(gpu-check test/gpu-check.c)
+  add_executable(gpu-check test/gpu-check.c src/tiles-math.c)
   target_link_libraries(gpu-check PRIVATE OBS::libobs)
+  target_include_directories(gpu-check PRIVATE src)
   if(NOT MSVC)
     target_link_libraries(gpu-check PRIVATE m)
   endif()

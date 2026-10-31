@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <math.h>
 
+#include "tiles-math.h"
 #include "tiles-transition.h"
 #include "transition-common.h"
 
@@ -49,41 +50,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define T_(x)           obs_module_text(x)
 
 /* clang-format on */
-
-enum tiles_mode {
-	TILES_MODE_COVER = 0,
-	TILES_MODE_KEYHOLE = 1,
-	TILES_MODE_WAVE = 2,
-	TILES_MODE_CROP_SHRINK = 3,
-	TILES_MODE_SCALE_SHRINK = 4,
-};
-
-enum tiles_shape {
-	TILES_SHAPE_SQUARE = 0,
-	TILES_SHAPE_CIRCLE = 1,
-	TILES_SHAPE_HEXAGON = 2,
-	TILES_SHAPE_TRIANGLE = 3,
-	TILES_SHAPE_DIAMOND = 4,
-	TILES_SHAPE_BRICK = 5,
-	TILES_SHAPE_OCTAGON = 6,
-	TILES_SHAPE_CAIRO = 7,
-	TILES_SHAPE_MOSAIC = 8,
-	TILES_SHAPE_SHATTER = 9,
-};
-
-enum tiles_direction {
-	TILES_DIR_INSIDE_OUT = 0,
-	TILES_DIR_OUTSIDE_IN = 1,
-	TILES_DIR_MIRRORED_IN = 2,
-	TILES_DIR_MIRRORED_OUT = 3,
-	TILES_DIR_ANGLE = 4,
-};
-
-enum tiles_easing {
-	TILES_EASE_LINEAR = 0,
-	TILES_EASE_IN_OUT = 1,
-	TILES_EASE_OUT = 2,
-};
 
 struct tiles_info {
 	struct transition_base base;
@@ -370,105 +336,6 @@ static void tiles_defaults(obs_data_t *settings)
 /* render                                                             */
 /* ------------------------------------------------------------------ */
 
-/* Distance from a tile centre to the furthest pixel it owns, in pixels. */
-static inline float tiles_circumradius(const struct tiles_info *tiles)
-{
-	switch (tiles->shape) {
-	case TILES_SHAPE_SQUARE:
-	case TILES_SHAPE_MOSAIC: /* the largest cell is a whole square */
-		return tiles->tile_px * 0.7071068f;
-	case TILES_SHAPE_DIAMOND:
-		/* the long diagonal, two triangle heights across */
-		return tiles->tile_px * 0.8660254f;
-	case TILES_SHAPE_BRICK:
-		return tiles->tile_px * 0.5590170f;
-	case TILES_SHAPE_OCTAGON:
-		return tiles->tile_px * 0.5411961f;
-	case TILES_SHAPE_CAIRO:
-		return tiles->tile_px * 0.5176381f;
-	case TILES_SHAPE_SHATTER:
-		/* a jittered cell can reach much further than a regular one */
-		return tiles->tile_px * 1.4f;
-	default:
-		return tiles->tile_px * 0.5773503f;
-	}
-}
-
-/*
- * The sweep extent is measured to the far canvas corner as seen from the
- * origin, so every tile still starts and finishes inside the transition when
- * the origin is offset or pushed outside the frame. It is padded by one tile
- * circumradius because a tile straddling the canvas edge has its centre
- * outside the frame, and it still has to take its turn in the sweep.
- */
-static void tiles_sweep_extent(const struct tiles_info *tiles, float ox, float oy, float cx, float cy, struct vec2 *dir,
-			       struct vec2 *range)
-{
-	float corner_x[4] = {0.0f, cx, 0.0f, cx};
-	float corner_y[4] = {0.0f, 0.0f, cy, cy};
-	float pad = tiles_circumradius(tiles);
-	float max_radius = 0.0f;
-	float proj_min = 0.0f;
-	float proj_max = 0.0f;
-	size_t i;
-
-	vec2_set(dir, cosf(tiles->angle), sinf(tiles->angle));
-
-	for (i = 0; i < 4; i++) {
-		float dx = corner_x[i] - ox;
-		float dy = corner_y[i] - oy;
-		float radius = sqrtf(dx * dx + dy * dy);
-		float proj = dx * dir->x + dy * dir->y;
-
-		if (radius > max_radius)
-			max_radius = radius;
-		if (i == 0 || proj < proj_min)
-			proj_min = proj;
-		if (i == 0 || proj > proj_max)
-			proj_max = proj;
-	}
-
-	switch (tiles->direction) {
-	case TILES_DIR_ANGLE:
-		vec2_set(range, proj_min - pad, fmaxf(proj_max - proj_min + 2.0f * pad, 1.0f));
-		break;
-	case TILES_DIR_MIRRORED_IN:
-	case TILES_DIR_MIRRORED_OUT:
-		vec2_set(range, 0.0f, fmaxf(fmaxf(fabsf(proj_min), fabsf(proj_max)) + pad, 1.0f));
-		break;
-	default:
-		vec2_set(range, 0.0f, fmaxf(max_radius + pad, 1.0f));
-		break;
-	}
-}
-
-/* Metric units per pixel, so the coverage ramp stays about one pixel wide. */
-static inline float tiles_edge_width(const struct tiles_info *tiles)
-{
-	switch (tiles->shape) {
-	case TILES_SHAPE_CIRCLE:
-		return 1.7320508f / tiles->tile_px;
-	case TILES_SHAPE_TRIANGLE:
-		return 3.4641016f / tiles->tile_px;
-	case TILES_SHAPE_DIAMOND:
-		/* its faces lean, so they are crossed faster than either axis
-		 * on its own suggests */
-		return 2.3094011f / tiles->tile_px;
-	case TILES_SHAPE_BRICK:
-		/* a brick is half as tall as it is wide, so its metric climbs
-		 * twice as fast across the long edges as it does the short */
-		return 4.0f / tiles->tile_px;
-	case TILES_SHAPE_CAIRO:
-		return 2.7320508f / tiles->tile_px;
-	default:
-		/* squares, hexagons, diamonds, octagons, mosaic and shatter
-		 * cells all gain one metric unit over half a lattice unit at
-		 * their steepest. Where a tiling mixes sizes, the shader widens
-		 * this per cell - see Cell.aa in the effect. */
-		return 2.0f / tiles->tile_px;
-	}
-}
-
 static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t, uint32_t cx, uint32_t cy)
 {
 	struct tiles_info *tiles = data;
@@ -477,6 +344,8 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	struct vec2 grid_rot;
 	struct vec2 dir;
 	struct vec2 range;
+	float dir_v[2];
+	float range_v[2];
 	float band;
 	float tile_dur = tiles->tile_duration;
 	struct tc_frame frame;
@@ -485,19 +354,14 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	vec2_set(&origin, tiles->origin_x * (float)cx, tiles->origin_y * (float)cy);
 	vec2_set(&grid_rot, cosf(tiles->grid_rotation), sinf(tiles->grid_rotation));
 
-	tiles_sweep_extent(tiles, origin.x, origin.y, (float)cx, (float)cy, &dir, &range);
+	tiles_sweep_extent(tiles->direction, tiles->angle, origin.x, origin.y, (float)cx, (float)cy,
+			   tiles_circumradius(tiles->shape, tiles->tile_px), dir_v, range_v);
+	vec2_set(&dir, dir_v[0], dir_v[1]);
+	vec2_set(&range, range_v[0], range_v[1]);
 
 	band = tiles->band_px / range.y;
-
-	/* The wave has to grow, hold and shrink inside the same sweep. */
-	if (tiles->mode == TILES_MODE_WAVE) {
-		float total = 2.0f * tile_dur + band;
-
-		if (total > 0.95f) {
-			tile_dur *= 0.95f / total;
-			band *= 0.95f / total;
-		}
-	}
+	if (tiles->mode == TILES_MODE_WAVE)
+		tiles_wave_fit(&tile_dur, &band);
 
 	tc_frame_begin(&frame);
 	tc_set_texture(&frame, tiles->ep_a_tex, a);
@@ -515,7 +379,7 @@ static void tiles_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 	 * so every tile grows at the same rate wherever it sits in the sweep */
 	gs_effect_set_float(tiles->ep_progress, t);
 	gs_effect_set_float(tiles->ep_tile_px, tiles->tile_px);
-	gs_effect_set_float(tiles->ep_edge, tiles_edge_width(tiles));
+	gs_effect_set_float(tiles->ep_edge, tiles_edge_width(tiles->shape, tiles->tile_px));
 	gs_effect_set_float(tiles->ep_tile_dur, tile_dur);
 	gs_effect_set_float(tiles->ep_band, band);
 	gs_effect_set_float(tiles->ep_randomness, tiles->randomness);
