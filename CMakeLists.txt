@@ -58,6 +58,8 @@ target_sources(
     src/tiles-transition.h
     src/transition-common.c
     src/transition-common.h
+    src/vortex-math.c
+    src/vortex-math.h
     src/vortex-transition.c
     src/vortex-transition.h
 )
@@ -86,12 +88,7 @@ if(ENABLE_TESTS)
   endfunction()
 
   add_shader_test(test-tiling test/test-tiling.cpp src/tiles-math.c)
-
-  add_executable(test-vortex test/test-vortex.c)
-  if(NOT MSVC)
-    target_link_libraries(test-vortex PRIVATE m)
-  endif()
-  add_test(NAME test-vortex COMMAND test-vortex)
+  add_shader_test(test-vortex test/test-vortex.cpp src/vortex-math.c)
 
   # The glass transition builds its shards in C rather than in a shader, so the
   # test links that code instead of mirroring it.
@@ -151,7 +148,7 @@ if(ENABLE_GPU_TESTS)
 
   # Sprite effects like the tiling one, but with uniforms of their own and a
   # schedule from their own math, so each gets a check of its own.
-  foreach(check IN ITEMS matte portal)
+  foreach(check IN ITEMS matte portal vortex)
     add_executable(${check}-check test/${check}-check.c src/${check}-math.c)
     target_link_libraries(${check}-check PRIVATE OBS::libobs)
     target_include_directories(${check}-check PRIVATE src)
@@ -181,10 +178,18 @@ if(ENABLE_GPU_TESTS)
   )
   set_tests_properties(plugin-check PROPERTIES LABELS gpu)
 
-  foreach(check IN ITEMS gpu:tiles glass:glass matte:matte portal:portal)
-    string(REPLACE ":" ";" check "${check}")
-    list(GET check 0 exe)
-    list(GET check 1 effect)
+  # Each check renders the effect of the same name, but for the tiling one,
+  # which was the first and is called gpu-check.
+  foreach(
+    effect
+    IN
+    ITEMS tiles glass matte portal vortex
+  )
+    if(effect STREQUAL "tiles")
+      set(exe gpu)
+    else()
+      set(exe ${effect})
+    endif()
     add_test(
       NAME ${exe}-check
       COMMAND ${exe}-check "${CMAKE_CURRENT_SOURCE_DIR}/data/effects/${effect}_transition.effect"

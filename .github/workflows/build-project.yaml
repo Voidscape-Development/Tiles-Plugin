@@ -232,7 +232,7 @@ jobs:
             -DCMAKE_COMPILE_WARNING_AS_ERROR=ON -DENABLE_TESTS=ON -DENABLE_GPU_TESTS=ON
           cmake --build build_tests --parallel
 
-          ctest --test-dir build_tests --output-on-failure --parallel --label-exclude gpu
+          ctest --test-dir build_tests --output-on-failure --label-exclude gpu --parallel "$(nproc)"
           LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a ctest --test-dir build_tests --output-on-failure --label-regex gpu
 
       - name: Package Plugin 📀
