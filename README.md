@@ -372,55 +372,76 @@ cmake --build --preset ubuntu-x86_64
 
 ## Tests
 
-`test/test-tiling.c` mirrors the lattice and coverage math from
-`data/effects/tiles_transition.effect` and checks the two properties the
-transition depends on: that each shape covers the canvas completely at full
-scale (across tile sizes, grid rotations and origins, including origins outside
-the frame), and that every tile's turn falls inside the transition so nothing is
-left unfinished.
+CI runs every suite below on each pull request: the CPU tests directly, and the
+GPU checks on a software rasteriser under Xvfb.
 
-`test/test-glass.c` covers the glass transition differently, because that one
-builds its shards in C rather than in a shader: the test links `src/glass-mesh.c`
-directly instead of mirroring it. It checks the two properties the transition
-rests on — that the shards are an exact partition of the canvas for every
-pattern, shard size and impact point, including impacts outside the frame, and
-that every shard's flight fits inside the transition, seated and opaque on the
-first frame and finished on the last. It also checks that the seam bleed only
-ever grows a shard, that every cell is convex with its centroid inside it (the
-shards are drawn as a fan from that point), that the shard ceiling gives fewer
-larger shards rather than a partial break, and that the same settings always
-give the same break.
+### Testing the shaders' own code
 
-`test/test-vortex.c` does the same for `data/effects/vortex_transition.effect`:
-that the transition starts on an untouched outgoing scene and ends on an
-untouched incoming one for every pixel and every setting, that the portal is
-opaque edge to edge for the whole hold so the scene swap cannot show, that the
-noise wrapped around the circle actually meets itself and leaves no seam, and
-that the portal is always sized past the furthest corner of the canvas.
+Each effect keeps its math — everything that is not a texture fetch — in a
+`*_math.effect` file beside it, which the effect `#include`s. The CPU tests
+compile those same files as C++, through `test/hlsl.hpp`, a small shim with
+just enough HLSL for them, with the effect's uniforms declared as plain globals
+the test sets the way the plugin does. So the tests check the geometry the
+shader actually runs rather than a copy of it, and a change to the shader is a
+change to what is tested. The parts worked out on the CPU once a frame —
+sweep extents, phase clocks, ramp widths — are plain C in `src/*-math.c`,
+shared by the plugin, the tests and the GPU checks.
 
-It also covers the bounds the shader uses to skip work: the portal boundary
-never leaves the band the radius test assumes it is in, and the reveal really is
-finished below its low bound and untouched above its high one, so the pixels
-those tests throw away had nothing to contribute. The colour path is checked the
-same way — a single colour comes back exactly as it went in, a mix never invents
-a colour outside the two entries it sits between, and both core sliders land on
-the values the look was tuned at when left at their defaults.
+`test/test-tiling.cpp` checks the two properties the tiling transition depends
+on: that each shape covers the canvas completely at full scale (across tile
+sizes, grid rotations and origins, including origins outside the frame), and
+that every tile's turn falls inside the transition so nothing is left
+unfinished. It also checks that tiles never overlap, that the coverage ramp is
+as wide as each shape's metric needs, and that cover is opaque either side of
+the scene swap.
 
-`test/test-matte.c` and `test/test-portal.c` link `src/matte-math.c` and
-`src/portal-math.c`, which hold the geometry and the clock the plugin builds the
-two transitions' uniforms from. The matte test checks that both ends are exact
-for every shape, both directions, any centre on or off the canvas, turn, spin,
-stretch and band layout; that each shape is what it says — the polygons are 1
-on their own outline, a star at full depth is the polygon; that the grown
-shapes scale about their centres and every field is monotone along rays from
-it, which is what lets the range be found from the canvas edge alone; that the
-clock starts at 0 and finishes at 1 with the pause holding; and that image
-silhouettes trace sensibly, holes filled. The portal test checks that the first
-frame has no portal and the last has every pixel past the shader's early exit to
-the untouched incoming scene, and that the size is continuous across the
-phases, with a pop that overshoots only a little.
+`test/test-vortex.cpp` checks that the vortex starts on an untouched outgoing
+scene and ends on an untouched incoming one for every pixel and every setting,
+that the portal is opaque edge to edge for the whole hold so the scene swap
+cannot show, that the noise wrapped around the circle actually meets itself and
+leaves no seam, and that the portal is always sized past the furthest corner of
+the canvas. Wherever the shader settles a pixel from its radius alone and skips
+the noise, the test checks that the answer is the one the noise would have
+given, on every pixel. The colour path is checked the same way — a single colour
+comes back exactly as it went in, a mix never invents a colour outside the two
+entries it sits between, and both core sliders land on the values the look was
+tuned at when left at their defaults.
 
-None of them needs OBS or a GPU:
+`test/test-portal.cpp` checks that the first frame has no portal and the last
+has every pixel past the shader's early exit to the untouched incoming scene,
+and that the size is continuous across the phases, with a pop that overshoots
+only a little.
+
+`test/test-mirrors.cpp` covers the two pieces of shader math the plugin needs on
+the CPU as well, so they exist in C too: the matte field, which the plugin
+samples along the canvas edge to find the front's range, and the glass shard
+motion, which it evaluates every frame to draw the shards back to front. It
+holds each C copy to its shader over every shape and style.
+
+### Testing the C
+
+`test/test-glass.c` links `src/glass-mesh.c`, because the glass transition
+builds its shards in C. It checks the two properties the transition rests on —
+that the shards are an exact partition of the canvas for every pattern, shard
+size and impact point, including impacts outside the frame, and that every
+shard's flight fits inside the transition, seated and opaque on the first frame
+and finished on the last. It also checks that the seam bleed only ever grows a
+shard, that every cell is convex with its centroid inside it (the shards are
+drawn as a fan from that point), that the shard ceiling gives fewer larger
+shards rather than a partial break, and that the same settings always give the
+same break.
+
+`test/test-matte.c` links `src/matte-math.c`, which holds the geometry and the
+clock the plugin builds the matte cutout's uniforms from. It checks that both
+ends are exact for every shape, both directions, any centre on or off the
+canvas, turn, spin, stretch and band layout; that each shape is what it says —
+the polygons are 1 on their own outline, a star at full depth is the polygon;
+that the grown shapes scale about their centres and every field is monotone
+along rays from it, which is what lets the range be found from the canvas edge
+alone; that the clock starts at 0 and finishes at 1 with the pause holding; and
+that image silhouettes trace sensibly, holes filled.
+
+None of these needs OBS or a GPU:
 
 ```sh
 cmake -S . -B build -DENABLE_TESTS=ON
@@ -428,41 +449,43 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`test/gpu-check.c` goes further and renders the effect on a real graphics
-device, over every transition type, shape and direction. It paints the outgoing
-scene red, the incoming scene blue and the tiles green, so anything else on
-screen — most importantly a black pixel — means a gap or a bad sample. It needs
-a graphics device, so it is kept out of the ctest suite:
+### On a graphics device
+
+The GPU checks render on a real device, so ctest runs them under the `gpu`
+label. On a headless machine run them under Xvfb:
 
 ```sh
 cmake -S . -B build -DENABLE_GPU_TESTS=ON
 cmake --build build
-xvfb-run -a ./build/gpu-check data/effects/tiles_transition.effect
+xvfb-run -a ctest --test-dir build --output-on-failure -L gpu
 ```
+
+`test/gpu-check.c` renders the tiling effect over every transition type, shape
+and direction. It paints the outgoing scene red, the incoming scene blue and
+the tiles green, so anything else on screen — most importantly a black pixel —
+means a gap or a bad sample.
 
 `test/glass-check.c` is the same idea for the glass transition, which needs its
 own because it draws a mesh rather than a sprite. It builds the real shards,
 uploads them and renders every break style and crack pattern. A vertex layout
 that does not match what the shader declares, a triangle wound the wrong way, a
 seam the bleed fails to close, or a first frame that is not quite the outgoing
-scene all show up here and nowhere else:
+scene all show up here and nowhere else.
 
-```sh
-xvfb-run -a ./build/glass-check data/effects/glass_transition.effect
-```
+`test/matte-check.c`, `test/portal-check.c` and `test/vortex-check.c` render the
+other three effects: both ends exact, and nothing missing in between. The matte
+check also renders each shape with hard edges mid-transition and compares every
+pixel's scene against `matte_field()` evaluated on the CPU, which holds the
+field's C copy to the compiled shader on a real device. The vortex check holds
+the hold opaque: not a pixel of either scene may show while the swap happens
+underneath.
 
-`test/matte-check.c` and `test/portal-check.c` render the two newer effects.
-The matte check covers every shape in both directions, plain and as a full
-stinger, and also renders each shape with hard edges mid-transition and
-compares every pixel's scene against `matte_field()` evaluated on the CPU. That
-is what holds the shader's field and its C mirror to each other: the plugin
-finds the front's range with the mirror, so a mirror that drifted would cut the
-transition short.
-
-```sh
-xvfb-run -a ./build/matte-check data/effects/matte_transition.effect
-xvfb-run -a ./build/portal-check data/effects/portal_transition.effect
-```
+`test/plugin-check.c` goes the furthest. It loads the built plugin into libobs
+and drives every transition the way OBS does — created as a source, given two
+scenes, set through its properties with every preset, and rendered through
+`obs_source_video_render()` — so it runs the plugin's own code between the
+settings and the shaders. A uniform the effect does not declare, a preset that
+does not round trip, or a matte mask image that never arrives shows up here.
 
 ## Licence
 
