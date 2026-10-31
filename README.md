@@ -116,14 +116,14 @@ tile still finishes exactly as the transition ends.
 - **Easing** — linear, ease in and out, or ease out. This shapes the order tiles
   launch in, not the transition clock, so the wavefront still accelerates away
   and settles while every tile grows at the same steady rate.
+- **Tiles leave in reverse order** (Cover) — the effect collapses back towards
+  where it started instead of the wave carrying on through.
 
 If the transition looks choppy, the usual cause is that there are not enough
 frames to animate in rather than anything in these settings: OBS's default 300 ms
 at 60 fps is only 18 frames, and a tile set to 35% has about 5 of them to grow
 in. Raising the transition duration in OBS buys every tile proportionally more
 frames, and is the most effective single change.
-- **Tiles leave in reverse order** (Cover) — the effect collapses back towards
-  where it started instead of the wave carrying on through.
 
 # Vortex Transition
 
@@ -169,7 +169,7 @@ coordinate system rather than being warped into place afterwards.
 The outgoing scene is a pane of glass. It cracks from wherever it was struck,
 the break races out to the corners, and then the shards let go.
 
-Unlike the other two, this one is not a full screen shader. The pane is a real
+Unlike the other transitions, this one is not a full screen shader. The pane is a real
 mesh of triangles, cut on the CPU and flown by its vertex shader, because a
 shard that leaves the frame, turns over or sails past the camera is not
 something a fragment shader can work out from the pixel it lands on. The shards

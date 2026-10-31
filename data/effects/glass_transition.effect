@@ -1,7 +1,7 @@
 /*
  * Glass - a shattering scene transition for OBS Studio.
  *
- * The other two transitions in this module are full screen shaders that work
+ * The other transitions in this module are full screen shaders that work
  * out, per pixel, what should be there. This one is not: the pane is a real
  * mesh of triangles, built on the CPU by src/glass-mesh.c, and the shards are
  * flown by moving their vertices. That is what lets a shard leave the frame

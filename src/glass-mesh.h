@@ -20,8 +20,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * The geometry and the motion behind the glass transition, with no dependency
  * on libobs or on a graphics device.
  *
- * The other two transitions in this module are full screen shaders, so their
- * math lives in the effect file and test/ mirrors it in C. This one is a mesh:
+ * The other transitions in this module are full screen shaders, so their
+ * math lives in their effect files. This one is a mesh:
  * the shards are real triangles built on the CPU, so the code here *is* the
  * implementation rather than a copy of it, and the tests link it directly.
  * Only glass_shard_xform() has a mirror - the vertex shader has to evaluate it
@@ -271,8 +271,8 @@ float glass_crack_front(float progress, float crack_end, int easing);
 void glass_shard_xform(const struct glass_motion *motion, const struct glass_shard *shard, struct glass_xform *out);
 
 /* The shard's distance from the camera, for back to front drawing. Larger is
- * nearer. Cheaper than the full transform, which is worth it once a frame per
- * shard. */
+ * nearer. This is the z of the full transform; the sort calls it once a frame
+ * per shard. */
 float glass_shard_depth(const struct glass_motion *motion, const struct glass_shard *shard);
 
 /* Sorts `order` (shard indices) back to front. `order` and `scratch` must each

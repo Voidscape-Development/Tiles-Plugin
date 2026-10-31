@@ -20,7 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * A shattering glass transition: the outgoing scene cracks from a point of
  * impact, holds a beat, and the shards fall away to leave the incoming one.
  *
- * The two transitions beside it in this module draw one full screen sprite and
+ * The other transitions in this module draw one full screen sprite and
  * decide per pixel what belongs there. This one cannot: a shard that leaves the
  * frame, turns over or sails past the camera is not a function of the pixel it
  * lands on, and finding out which shard did land on a pixel would mean
@@ -660,7 +660,7 @@ static void glass_mesh_build(struct glass_info *glass, uint32_t cx, uint32_t cy)
 
 	/*
 	 * Scattered into the layout the vertex shader declares. The position is
-	 * in canvas pixels, like the sprite the other two transitions draw, so
+	 * in canvas pixels, like the sprite the other transitions draw, so
 	 * the projection OBS has already set up still applies.
 	 */
 	vbd = gs_vbdata_create();
@@ -780,7 +780,7 @@ static void *glass_create(obs_data_t *settings, obs_source_t *source)
 	glass->ep_glint_dir = gs_effect_get_param_by_name(effect, "glint_dir");
 	glass->ep_bg_level = gs_effect_get_param_by_name(effect, "bg_level");
 
-	/* Applied directly for the same reason the other two transitions do it:
+	/* Applied directly for the same reason the other transitions do it:
 	 * the source's data pointer is only assigned once create returns, so an
 	 * update queued here would not reach us until a later tick. */
 	glass_update(glass, settings);
@@ -823,7 +823,7 @@ struct glass_frame {
  * This is called again before each technique rather than once for the frame,
  * because ending a technique returns every parameter in the effect to its
  * default - and these have no defaults, so what the next technique would find
- * is nothing. The other two transitions never notice: they run one technique
+ * is nothing. The other transitions never notice: they run one technique
  * per frame. This one draws the incoming scene and then the mesh, and the
  * assemble style draws the mesh twice, so it notices every time.
  */
