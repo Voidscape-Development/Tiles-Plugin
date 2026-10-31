@@ -37,6 +37,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include <graphics/image-file.h>
 #include <util/dstr.h>
+#include <util/task.h>
+#include <util/threading.h>
 
 #include <math.h>
 #include <string.h>
@@ -408,7 +410,7 @@ struct matte_info {
 	struct tc_color echo_color[MATTE_ECHOES];
 	struct tc_color glow_color;
 
-	/* mask image - owned by the graphics thread once loaded */
+	/* mask image - owned by the graphics thread once adopted */
 	struct dstr image_path;
 	gs_image_file_ex_t image;
 	bool have_image;
@@ -416,6 +418,18 @@ struct matte_info {
 	gs_texture_t *profile_tex;
 	float profile[MATTE_PROFILE_SIZE];
 	float luma_lo, luma_hi;
+
+	/*
+	 * Mask images are decoded on a thread of their own, because settings
+	 * changes reach a transition on the graphics thread, and decoding a large
+	 * image there would drop frames. Each request bumps the generation; a
+	 * decode that finishes for an older one is thrown away. A finished one
+	 * waits in mask_ready until the next frame adopts it.
+	 */
+	os_task_queue_t *loader;
+	volatile long load_generation;
+	pthread_mutex_t mask_mutex;
+	struct matte_mask *mask_ready;
 
 	/* the field's range, cached against the canvas and the settings */
 	bool range_valid;
@@ -481,44 +495,73 @@ static void luma_range(const uint8_t *rgba, size_t n, float *lo, float *hi)
 	}
 }
 
-static void matte_load_image(struct matte_info *matte, const char *path)
-{
-	gs_image_file_ex_t img;
+/* A decoded mask image and everything worked out from it: all the render
+ * needs from the file except its textures, which only the graphics thread can
+ * make. */
+struct matte_mask {
+	gs_image_file_ex_t image;
+	bool have_profile;
 	float profile[MATTE_PROFILE_SIZE];
-	bool have_profile = false;
-	float lo = 0.0f, hi = 1.0f;
-	gs_texture_t *profile_tex = NULL;
+	float luma_lo, luma_hi;
+};
+
+/* Decodes and measures an image. Touches no graphics state, so it can run on
+ * any thread. An empty path gives an empty mask, which is no image. */
+static struct matte_mask *matte_decode_mask(const char *path)
+{
+	struct matte_mask *mask = bzalloc(sizeof(*mask));
 	uint8_t *rgba;
 
-	memset(&img, 0, sizeof(img));
+	mask->luma_lo = 0.0f;
+	mask->luma_hi = 1.0f;
 
 	if (path && *path) {
-		gs_image_file_ex_init(&img, path, GS_IMAGE_ALPHA_STRAIGHT);
+		gs_image_file_ex_init(&mask->image, path, GS_IMAGE_ALPHA_STRAIGHT);
 
-		if (!img.loaded)
+		if (!mask->image.loaded)
 			obs_log(LOG_WARNING, "matte: could not load mask image '%s'", path);
 	}
 
-	rgba = img.loaded ? image_rgba(&img) : NULL;
+	rgba = mask->image.loaded ? image_rgba(&mask->image) : NULL;
 	if (rgba) {
-		have_profile = matte_build_profile(rgba, img.cx, img.cy, profile);
-		luma_range(rgba, (size_t)img.cx * (size_t)img.cy, &lo, &hi);
+		mask->have_profile = matte_build_profile(rgba, mask->image.cx, mask->image.cy, mask->profile);
+		luma_range(rgba, (size_t)mask->image.cx * (size_t)mask->image.cy, &mask->luma_lo, &mask->luma_hi);
 		bfree(rgba);
 
-		if (!have_profile)
+		if (!mask->have_profile)
 			obs_log(LOG_WARNING, "matte: mask image '%s' has nothing in it to cut a shape from", path);
 	}
 
-	/* Everything the render callback reads is swapped under the graphics
-	 * lock, so a frame never sees half of an old image and half of a new
-	 * one, and the old textures are never freed out from under a draw. */
+	return mask;
+}
+
+/* Frees a mask that was never adopted. Takes the graphics context itself, as
+ * freeing a decoded image goes through the texture it may have. */
+static void matte_mask_free(struct matte_mask *mask)
+{
+	if (!mask)
+		return;
+
 	obs_enter_graphics();
+	gs_image_file_ex_free(&mask->image);
+	obs_leave_graphics();
+	bfree(mask);
+}
 
-	if (img.loaded)
-		gs_image_file_ex_init_texture(&img);
+/*
+ * Makes a decoded mask the one the render reads, creating its textures and
+ * freeing the old ones. Graphics context required, which is also what keeps a
+ * frame from seeing half of an old image and half of a new one.
+ */
+static void matte_adopt_mask(struct matte_info *matte, struct matte_mask *mask)
+{
+	gs_texture_t *profile_tex = NULL;
 
-	if (have_profile) {
-		const uint8_t *data = (const uint8_t *)profile;
+	if (mask->image.loaded)
+		gs_image_file_ex_init_texture(&mask->image);
+
+	if (mask->have_profile) {
+		const uint8_t *data = (const uint8_t *)mask->profile;
 
 		profile_tex = gs_texture_create(MATTE_PROFILE_SIZE, 1, GS_R32F, 1, &data, 0);
 	}
@@ -526,17 +569,97 @@ static void matte_load_image(struct matte_info *matte, const char *path)
 	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 
-	matte->image = img;
-	matte->have_image = img.loaded && img.texture != NULL;
+	matte->image = mask->image;
+	matte->have_image = mask->image.loaded && mask->image.texture != NULL;
 	matte->profile_tex = profile_tex;
-	matte->have_profile = have_profile && profile_tex != NULL;
-	if (have_profile)
-		memcpy(matte->profile, profile, sizeof(profile));
-	matte->luma_lo = lo;
-	matte->luma_hi = fmaxf(hi, lo + 0.001f);
+	matte->have_profile = mask->have_profile && profile_tex != NULL;
+	if (mask->have_profile)
+		memcpy(matte->profile, mask->profile, sizeof(matte->profile));
+	matte->luma_lo = mask->luma_lo;
+	matte->luma_hi = fmaxf(mask->luma_hi, mask->luma_lo + 0.001f);
 	matte->range_valid = false;
 
-	obs_leave_graphics();
+	/* the image itself has moved into matte->image */
+	bfree(mask);
+}
+
+/* Adopts a mask the loader has finished, if there is one. Graphics context
+ * required. */
+static void matte_take_mask(struct matte_info *matte)
+{
+	struct matte_mask *mask;
+
+	pthread_mutex_lock(&matte->mask_mutex);
+	mask = matte->mask_ready;
+	matte->mask_ready = NULL;
+	pthread_mutex_unlock(&matte->mask_mutex);
+
+	if (mask)
+		matte_adopt_mask(matte, mask);
+}
+
+struct matte_load_job {
+	struct matte_info *matte;
+	char *path;
+	long generation;
+};
+
+static void matte_load_task(void *param)
+{
+	struct matte_load_job *job = param;
+	struct matte_info *matte = job->matte;
+	struct matte_mask *mask = NULL;
+	struct matte_mask *stale = NULL;
+
+	/* superseded before it started, so not worth decoding */
+	if (os_atomic_load_long(&matte->load_generation) == job->generation)
+		mask = matte_decode_mask(job->path);
+
+	if (mask) {
+		pthread_mutex_lock(&matte->mask_mutex);
+		if (os_atomic_load_long(&matte->load_generation) == job->generation) {
+			stale = matte->mask_ready;
+			matte->mask_ready = mask;
+			mask = NULL;
+		}
+		pthread_mutex_unlock(&matte->mask_mutex);
+	}
+
+	matte_mask_free(mask);
+	matte_mask_free(stale);
+	bfree(job->path);
+	bfree(job);
+}
+
+/*
+ * Starts loading the image at path, replacing whatever is loading already.
+ *
+ * Before the loader exists - inside create, which is not on the graphics
+ * thread - the image is loaded there and then instead, so a transition is
+ * never first shown with its image missing.
+ */
+static void matte_request_mask(struct matte_info *matte, const char *path)
+{
+	struct matte_load_job *job;
+
+	if (!matte->loader) {
+		struct matte_mask *mask = matte_decode_mask(path);
+
+		obs_enter_graphics();
+		matte_adopt_mask(matte, mask);
+		obs_leave_graphics();
+		return;
+	}
+
+	job = bzalloc(sizeof(*job));
+	job->matte = matte;
+	job->path = bstrdup(path);
+	job->generation = os_atomic_inc_long(&matte->load_generation);
+
+	if (!os_task_queue_queue_task(matte->loader, matte_load_task, job)) {
+		bfree(job->path);
+		bfree(job);
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -618,7 +741,7 @@ static void matte_update(void *data, obs_data_t *settings)
 	/* an emptied dstr holds NULL rather than "", and that is still no image */
 	if (strcmp(matte->image_path.array ? matte->image_path.array : "", path) != 0) {
 		dstr_copy(&matte->image_path, path);
-		matte_load_image(matte, path);
+		matte_request_mask(matte, path);
 	}
 }
 
@@ -673,10 +796,18 @@ static void *matte_create(obs_data_t *settings, obs_source_t *source)
 	}
 
 	dstr_init(&matte->image_path);
+	pthread_mutex_init_value(&matte->mask_mutex);
+	if (pthread_mutex_init(&matte->mask_mutex, NULL) != 0) {
+		tc_base_free(&matte->base);
+		bfree(matte);
+		return NULL;
+	}
 
 	/* Applied directly, as the other transitions do: the source's data
-	 * pointer is only assigned once create returns. */
+	 * pointer is only assigned once create returns. The loader is started
+	 * after, so the first image is loaded here rather than handed off. */
 	matte_update(matte, settings);
+	matte->loader = os_task_queue_create();
 
 	return matte;
 }
@@ -685,11 +816,17 @@ static void matte_destroy(void *data)
 {
 	struct matte_info *matte = data;
 
+	/* Runs any load still queued to completion first, so nothing is left
+	 * to write into the struct once it is gone. */
+	os_task_queue_destroy(matte->loader);
+	matte_mask_free(matte->mask_ready);
+
 	obs_enter_graphics();
 	gs_image_file_ex_free(&matte->image);
 	gs_texture_destroy(matte->profile_tex);
 	obs_leave_graphics();
 
+	pthread_mutex_destroy(&matte->mask_mutex);
 	tc_base_free(&matte->base);
 	dstr_free(&matte->image_path);
 	bfree(matte);
@@ -989,7 +1126,7 @@ static void matte_frame_for(const struct matte_info *matte, int shape, float cx,
 static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t, uint32_t cx, uint32_t cy)
 {
 	struct matte_info *matte = data;
-	int shape = matte_effective_shape(matte);
+	int shape;
 	struct matte_shape_params sp;
 	struct matte_frame frame;
 	struct vec2 canvas, origin, rot, inv_stretch;
@@ -999,6 +1136,10 @@ static void matte_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t
 
 	struct tc_frame blend;
 	int i;
+
+	/* a mask image the loader has finished since the last frame */
+	matte_take_mask(matte);
+	shape = matte_effective_shape(matte);
 
 	matte_frame_for(matte, shape, fcx, fcy, &frame);
 	matte_shape_params(matte, shape, &frame, fcx, fcy, &sp);
